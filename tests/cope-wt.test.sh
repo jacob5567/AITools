@@ -154,9 +154,9 @@ T=$S/fake-transcript.jsonl
 cat > "$T" <<'EOF'
 {"type":"assistant","message":{"id":"m1","model":"claude-haiku-5-5","usage":{"input_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":3}}}
 {"type":"assistant","message":{"id":"m1","model":"claude-haiku-5-5","usage":{"input_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":0,"output_tokens":40}}}
-{"type":"assistant","message":{"id":"m2","model":"claude-haiku-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":10,"cache_read_input_tokens":900,"output_tokens":7}}}
+{"type":"assistant","message":{"id":"m2","model":"claude-haiku-5-5","stop_reason":"end_turn","usage":{"input_tokens":2,"cache_creation_input_tokens":10,"cache_read_input_tokens":900,"output_tokens":7}}}
 EOF
-export COPE_USAGE_LOG=$S/usage.tsv; rm -f "$COPE_USAGE_LOG"
+export COPE_USAGE_LOG=$S/usage.tsv COPE_USAGE_SYNC=1; rm -f "$COPE_USAGE_LOG"
 out=$(echo '{"agent_type":"cope-executor","agent_transcript_path":"'"$T"'","session_id":"abcdef123","cwd":"/x/myrepo"}' | $W hook-usage); rc=$?
 echo '{"agent_type":"Explore","agent_transcript_path":"'"$T"'"}' | $W hook-usage
 echo 'not json' | $W hook-usage; rc2=$?
@@ -164,5 +164,21 @@ echo 'not json' | $W hook-usage; rc2=$?
 [[ $(tail -n +2 "$COPE_USAGE_LOG" | wc -l) == 1 ]] && tail -1 "$COPE_USAGE_LOG" | grep -qP '\tcope-executor\thaiku-5-5\t7\t110\t900\t47$' \
   && ok "usage: deduped by message id, non-cope agents skipped" || { bad "usage row"; cat "$COPE_USAGE_LOG"; }
 $W report | grep -q 'TOTAL .*haiku-5-5 .*out=     47' && ok "report totals" || { bad report; $W report; }
+
+# Race: the hook fires while the last message is still streaming; the detached parser must wait for it.
+unset COPE_USAGE_SYNC; T2=$S/race.jsonl; L2=$S/race.tsv
+echo '{"type":"assistant","message":{"id":"r1","model":"claude-sonnet-5-5","stop_reason":null,"usage":{"input_tokens":1,"cache_creation_input_tokens":50,"cache_read_input_tokens":0,"output_tokens":4}}}' > "$T2"
+start=$(date +%s%N)
+echo '{"agent_type":"cope-interpreter","agent_transcript_path":"'"$T2"'","session_id":"race1234","cwd":"/x/r"}' | COPE_USAGE_LOG=$L2 $W hook-usage
+took=$(( ($(date +%s%N) - start) / 1000000 ))
+sleep 1
+echo '{"type":"assistant","message":{"id":"r1","model":"claude-sonnet-5-5","stop_reason":"end_turn","usage":{"input_tokens":1,"cache_creation_input_tokens":50,"cache_read_input_tokens":0,"output_tokens":600}}}' >> "$T2"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -f $L2 ]] && break; sleep 0.3; done
+(( took < 500 )) && ok "hook-usage returns immediately (${took}ms)" || bad "hook-usage blocked for ${took}ms"
+tail -1 "$L2" 2>/dev/null | grep -qP '\tcope-interpreter\tsonnet-5-5\t1\t50\t0\t600$' && ok "usage waits for the final message (race)" || { bad "race: $(tail -1 "$L2" 2>/dev/null)"; }
+
+# Run log goes to $COPE_LOG, never the real one, when set.
+L3=$S/runlog.tsv; COPE_LOG=$L3 $W log myrepo code 2 stage1 PASS "haiku,sonnet" "add a thing" >/dev/null
+[[ $(cut -f2- "$L3") == $'myrepo\tcode\t2\tstage1\tPASS\thaiku,sonnet\tadd a thing' && $(cut -f1 "$L3") == "$(date +%F)" ]] && ok "log writes a dated, tab-separated line to COPE_LOG" || { bad "log"; cat "$L3"; }
 
 echo; ((FAILS)) && { echo "$FAILS failure(s)"; exit 1; } || echo "all passed"

@@ -15,6 +15,7 @@
 #   cope-wt brief save|path           store the scout's brief from stdin (prints its path) / print the path
 #   cope-wt cleanup [--final|--all]   remove this run's worktrees and snapshot (--final: also its brief;
 #                                     --all: every run in this repo)
+#   cope-wt log FIELD...              append a run line (date + tab-separated fields) to $COPE_LOG (~/.claude/cope-log.tsv)
 #   cope-wt report [N]                token usage per agent and model for the last N runs (default 5)
 #
 # Runs are keyed by the Claude Code session (CLAUDE_CODE_SESSION_ID, or COPE_RUN), so concurrent
@@ -174,22 +175,32 @@ cmd_hook_usage() {
   cwd=$(jq -r '.cwd // empty' <<<"$input" 2>/dev/null) || cwd=""
   # Agents in candidate worktrees report the worktree as cwd; name the main repo instead.
   [[ -n $cwd ]] && repo=$(cd "$cwd" 2>/dev/null && basename "$(main_root)" 2>/dev/null) || repo=$(basename "${cwd:-?}")
-  python3 -I -c "$(cat <<'PY'
+  local script
+  script=$(cat <<'PY'
 import json, sys, os, time
 ev = json.loads(sys.stdin.read())
 agent = ev.get("agent_type") or ""
 path = ev.get("agent_transcript_path") or ""
 if not agent.startswith("cope") or not os.path.isfile(path):
     sys.exit(0)
-last = {}
-for line in open(path, encoding="utf-8", errors="replace"):
-    try:
-        e = json.loads(line)
-    except ValueError:
-        continue
-    m = e.get("message") or {}
-    if e.get("type") == "assistant" and "usage" in m:
-        last[m.get("id")] = (m.get("model", "?"), m["usage"])
+def read():
+    last, final = {}, False
+    for line in open(path, encoding="utf-8", errors="replace"):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        m = e.get("message") or {}
+        if e.get("type") == "assistant" and "usage" in m:
+            last[m.get("id")] = (m.get("model", "?"), m["usage"])
+            final = m.get("stop_reason") is not None
+    return last, final
+# SubagentStop can fire before the agent's last message is flushed; wait (bounded) until it is.
+deadline = time.time() + float(os.environ.get("COPE_USAGE_WAIT", "15"))
+last, final = read()
+while not final and time.time() < deadline:
+    time.sleep(0.3)
+    last, final = read()
 by_model = {}
 for model, u in last.values():
     t = by_model.setdefault(model, [0, 0, 0, 0])
@@ -205,8 +216,22 @@ with open(log, "a") as f:
                            sys.argv[2], agent, model.replace("claude-", "")]
                           + [str(x) for x in t]) + "\n")
 PY
-)" "$USAGE_LOG" "$repo" <<<"$input" >/dev/null 2>&1 || true
+)
+  # Parse in a detached process so the hook returns at once and never delays the agent.
+  if [[ -n ${COPE_USAGE_SYNC:-} ]]; then
+    python3 -I -c "$script" "$USAGE_LOG" "$repo" <<<"$input" >/dev/null 2>&1 || true
+  else
+    setsid python3 -I -c "$script" "$USAGE_LOG" "$repo" <<<"$input" >/dev/null 2>&1 &
+  fi
   exit 0
+}
+
+cmd_log() {
+  local f=${COPE_LOG:-$HOME/.claude/cope-log.tsv} IFS=$'\t'
+  (($#)) || die "usage: cope-wt log FIELD..."
+  mkdir -p "$(dirname "$f")"
+  printf '%s\t%s\n' "$(date +%F)" "$*" >> "$f"
+  echo "LOGGED $f"
 }
 
 cmd_report() {
@@ -475,7 +500,8 @@ case ${1:-} in
   apply) shift; cmd_apply "$@" ;;
   cleanup) shift; cmd_cleanup "$@" ;;
   report) shift; cmd_report "$@" ;;
+  log) shift; cmd_log "$@" ;;
   brief) shift; cmd_brief "$@" ;;
   profile) shift; cmd_profile "$@" ;;
-  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

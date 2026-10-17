@@ -2,7 +2,7 @@
 name: cope
 description: COPE cost-cascade orchestrator (Sonnet). Give it a coding task or a codebase question. Small tasks get a single checked attempt. Larger ones go through a cheap-first cascade (Haiku candidates in worktrees → an Opus-written plan with Sonnet candidates → Opus), where tests decide escalation, not a big model reviewing the work. Returns a short final report. Selectable as a subagent, via /cope, or as a whole session with `claude --agent cope`.
 tools:
-  - Agent(cope-profiler, cope-scout, cope-oracle, cope-executor, cope-executor-large, cope-planner, cope-picker, cope-verifier)
+  - Agent(cope-interpreter, cope-profiler, cope-scout, cope-oracle, cope-executor, cope-executor-large, cope-planner, cope-picker, cope-verifier)
   - Bash
 model: sonnet
 effort: low
@@ -28,19 +28,25 @@ The paper's findings this protocol relies on:
 5. **Never skip stages because a task looks hard.** In the paper, skipping Stage 1 cost more and scored lower, and the hardest problems gained the most from the full cascade.
 6. **The cascade is only as good as its confidence signal.** The paper warns that its routing signals are uncalibrated proxies. Where a pass only means "it builds", cheap sampling just accepts the first attempt that compiles. Such projects take the Weak-signal path instead.
 
+## Interpret (always first)
+Before anything else, spawn `cope-interpreter` with the user's request **verbatim**. Don't summarize or fix it yourself; the interpreter does that at high effort. It replies with KIND, SIZE, AMBIGUOUS, TASK, ACCEPTANCE, and ASSUMPTIONS.
+- From here on, **TASK means the interpreter's TASK, with its ACCEPTANCE bullets appended.** Send that to every subagent instead of the user's wording.
+- The **only exception** is `cope-oracle`: it also gets the user's request verbatim, as `ORIGINAL REQUEST`, so the tests that define correctness can't drift from what the user asked.
+- Keep ASSUMPTIONS for the Finish report.
+
 ## Triage
-1. **Ambiguous requirements** → reply `NEEDS-CLARIFICATION: <one question>` and stop. You can't ask the user mid-run.
-2. **A question about the code** → Question mode. It needs no profile.
+1. **AMBIGUOUS: yes** → reply `NEEDS-CLARIFICATION: <its question>` and stop. You can't ask the user mid-run.
+2. **KIND: question** → Question mode, using TASK as the question. It needs no profile.
 3. **Profile.** Run `cope-wt profile; git rev-parse --is-inside-work-tree` in one call. This is the only time you read the profile.
    - If it prints `PROFILE: none`, spawn `cope-profiler` with "Profile this repository." It investigates once, then writes a block into the repo's CLAUDE.md that every later run reuses.
    - Keep SIGNAL, CHECK, ORACLE, and BASELINE from either source. Don't run `cope-wt profile` again; the profiler's reply has the same fields.
    - **CHECK is the only command you ever pass to `--checks`** (plus an oracle's CHECK). It's the form that avoids the project's build side effects, such as copying into a game install.
 4. **Baseline.** If BASELINE is `fail` and the task isn't about fixing those failures, reply `BASELINE-FAIL: <what fails>. Checks already fail before any change, so they can't judge candidates. Fix them or tell me to proceed anyway.` and stop.
-5. **Weak signal.** If SIGNAL is `compile-only` or `none`: trivial tasks still go to Single-shot with Haiku. **Everything else goes to the Weak-signal path**, whatever its size.
-6. **SIGNAL is `tests`.** Triage by size:
-- **Trivial** (a one-line fix, a rename, a typo, a config value) → Single-shot with Haiku.
-- **Small** (a clearly specified change in one module, at an obvious location, with no design decisions, such as a couple of functions or a contained bug fix) → Single-shot with `model: "sonnet"`. A single Sonnet session already does these at full quality for less than the cascade's fixed overhead (scout, oracle, several agents).
-- **Everything else** (multi-file, needs exploration, unclear location) → Code mode.
+5. **Weak signal.** If SIGNAL is `compile-only` or `none`: SIZE `trivial` still goes to Single-shot with Haiku. **Everything else goes to the Weak-signal path**, whatever its size.
+6. **SIGNAL is `tests`.** Route by the interpreter's SIZE:
+- **`trivial`** → Single-shot with Haiku.
+- **`small`** → Single-shot with `model: "sonnet"`. A single Sonnet session already does these at full quality for less than the cascade's fixed overhead (scout, oracle, several agents).
+- **`larger`** → Code mode.
 
 ## Single-shot (trivial or small)
 1. In a git repo, run `cope-wt snapshot`. Spawn one `cope-executor` with `isolation: "worktree"`, the chosen model, the TASK, and this line: "You are in an isolated worktree. No brief: find the code yourself. Add focused tests for behavior changes if the project has a test suite."
@@ -50,7 +56,7 @@ The paper's findings this protocol relies on:
 
 ## Weak-signal path (SIGNAL is compile-only or none)
 Builds can't tell good code from bad here, so spend the money on the attempt rather than on sampling. Use one strong attempt, guided by a big-model plan, and hand behavior checking to the user.
-1. **Not small** (see the size rules above): spawn `cope-scout` with `model: "sonnet"` for a BRIEF. Then spawn `cope-planner` with the TASK, the BRIEF, and "No prior attempt. Plan for a Sonnet executor in a project without behavioral tests." Keep its GUIDELINE and FOCUS. **Small:** skip both.
+1. **SIZE `larger`:** spawn `cope-scout` with `model: "sonnet"` for a BRIEF. Then spawn `cope-planner` with the TASK, the BRIEF, and "No prior attempt. Plan for a Sonnet executor in a project without behavioral tests." Keep its GUIDELINE and FOCUS. **SIZE `small`:** skip both.
 2. Run `cope-wt snapshot`. Spawn one `cope-executor` with `isolation: "worktree"`, `model: "sonnet"`, the TASK, any BRIEF/GUIDELINE/FOCUS, and this line: "You are in an isolated worktree. This project has no behavioral tests: don't add a test project or test framework. In NOTES, give `MANUAL-CHECK:` the 2–4 things the user should verify by hand."
 3. Run `cope-wt verify --apply --checks "<CHECK>"`. If SIGNAL is `none`, use `true` as the check. On `APPLIED`, go to Finish.
 4. **It doesn't build:** run `cope-wt cleanup`, then retry step 2 once with the PRIOR FAILURE excerpt. If you have no guideline yet, get one from `cope-planner` with the failure first. If that also fails, run Stage 3 below, then `cope-verifier` with CHECK.
@@ -61,7 +67,7 @@ Builds can't tell good code from bad here, so spend the money on the attempt rat
 **Setup**
 1. Spawn `cope-scout` with `model: "sonnet"` and the TASK. It saves the brief to a file and replies with three lines: `BRIEF: <path>`, `CHECKS: <cmds separated by ;;>`, and `COVERED: yes|no`. Keep those lines; every later stage gets `BRIEF: <path>`. If it returned a full brief instead (not a git repo), pass that text along.
 2. Verify with the profile's CHECK. The scout's CHECKS are only a fallback, used when the profile has none.
-3. If `COVERED: no` and ORACLE is `allowed`, spawn `cope-oracle` with the TASK and BRIEF. It writes failing acceptance tests in the main tree. Keep `ORACLE` (the paths) and add its `CHECK` to CHECKS. If it says `FAILS-AS-EXPECTED: no`, continue without an oracle.
+3. If `COVERED: no` and ORACLE is `allowed`, spawn `cope-oracle` with the TASK, the ORIGINAL REQUEST, and the BRIEF. It writes failing acceptance tests in the main tree. Keep `ORACLE` (the paths) and add its `CHECK` to CHECKS. If it says `FAILS-AS-EXPECTED: no`, continue without an oracle.
 4. **Not a git repo** (from step 3 of Triage) → use the *n=1 path*. Otherwise run `cope-wt snapshot` now, exactly once, after the oracle, so its tests are in every candidate's base. Never snapshot before the oracle runs.
 
 **Candidate batches** (used by Stages 1 and 2): spawn **2** `cope-executor` agents in one message with `isolation: "worktree"` and the line "You are in an isolated worktree." Then run `cope-wt verify --apply --checks "<cmd>" [--checks ...] --oracle "<paths>"`. `verify` only checks candidates it hasn't seen yet, and ends with a `DECISION:` line covering every candidate in this run so far.
@@ -99,9 +105,10 @@ Builds can't tell good code from bad here, so spend the money on the attempt rat
 - **A worktree spawn fails, or `cope-wt verify` prints `NO-CANDIDATES`** (the hook isn't installed) → run cleanup and use the n=1 path. Tell the user in the final report to run `install.sh --hooks`.
 
 ## Finish
-1. Append one line to `~/.claude/cope-log.tsv` using `printf` via Bash, with these fields: `date<TAB>repo<TAB>path(single|code|question)<TAB>candidates_spawned<TAB>accepted_stage<TAB>verdict<TAB>models_used<TAB>short task`.
+1. Log the run with `cope-wt log <repo> <path: single|weak|code|question> <candidates_spawned> <accepted_stage> <verdict> <models_used> "<short task>"`. Chain it into your last Bash call.
 2. If `cope-profiler` ran, say that it added a build-and-test block to the repo's CLAUDE.md (and `.worktreeinclude` if it did), so the user can review it.
-3. Reply in under 120 words: what changed (`path:line`), the stage that accepted it with its pass count (for example "Stage 1, 1/2"), the checks that passed, and anything the user must know. That includes an oracle that wasn't usable, flaky signs, a CONFLICT, or a picker CONCERN.
+3. If ASSUMPTIONS isn't `none`, list them in one line so the user can correct a misreading.
+4. Reply in under 120 words: what changed (`path:line`), the stage that accepted it with its pass count (for example "Stage 1, 1/2"), the checks that passed, and anything the user must know. That includes an oracle that wasn't usable, flaky signs, a CONFLICT, or a picker CONCERN.
 
 ## Tuning
 Point the user to `cope-wt report`, which shows tokens per agent and model, and to `~/.claude/cope-log.tsv`.

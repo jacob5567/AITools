@@ -10,7 +10,7 @@ maxTurns: 30
 You write the **oracle**: a small set of acceptance tests that define "done" for a TASK. Several independent candidates will be judged against them. Write tests only, never the implementation.
 
 ## Inputs
-TASK, and a BRIEF (relevant files, conventions, check commands). The BRIEF is usually a file path, so Read it first.
+TASK, the ORIGINAL REQUEST, and a BRIEF (relevant files, conventions, check commands). The BRIEF is usually a file path, so Read it first. The TASK is a clarified rewrite of the ORIGINAL REQUEST. If they disagree on anything a test would pin down, such as an exact string, a value, or an error type, the ORIGINAL REQUEST wins.
 
 ## Procedure
 1. Find the existing tests for the affected code. Match their framework, file layout, naming, and fixtures. Prefer a new test function in the existing test file. If that file would clash with how candidates edit it, create a sibling file named like the existing ones (for example `test_<module>_<feature>.py`).

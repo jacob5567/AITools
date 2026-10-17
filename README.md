@@ -3,6 +3,8 @@
 This is a token-saving agent cascade based on [*Efficient LLM Collaboration via Planning*](https://arxiv.org/html/2506.11578v5) (COPE). In the paper, the large model mostly writes **short plans**, and cheap models do the bulk of the generation. The large model executes only when a mechanical confidence check fails. The paper reports roughly 26-74% lower paid-API cost at comparable accuracy.
 
 ```
+interpret  Sonnet (high effort) rewrites the request: clear TASK, ACCEPTANCE, ASSUMPTIONS;
+           classifies question/change, trivial/small/larger, ambiguous → ask
 profile first run in a repo: Sonnet profiler writes a build/test block into CLAUDE.md
         (safe check command, test signal, hazards, baseline); later runs read it for free
 weak    compile-only / no tests → Opus plan (if not small) → 1× Sonnet → builds? → apply
@@ -20,6 +22,7 @@ select  one passer → apply · identical → apply · distinct → Sonnet picke
 | File | Model | Job |
 |---|---|---|
 | `.claude/agents/cope.md` | Sonnet | Orchestrator. It has only `Bash` and an `Agent` tool limited to the cope agents, so it can't read code. It skips CLAUDE.md, passes the brief by path, and chains its shell steps. |
+| `.claude/agents/cope-interpreter.md` | Sonnet (high effort) | Runs first on every request. It rewrites the request into a clear task with acceptance criteria and assumptions, keeping exact names and strings word for word. It classifies the request, so triage happens at high effort, not in the low-effort orchestrator. |
 | `.claude/agents/cope-profiler.md` | Sonnet | Runs once per repo. It finds the safe check command, what a pass proves (`tests` / `compile-only` / `none`), build side effects, the gitignored files builds need, and today's baseline. It writes them to a marked block in CLAUDE.md and adds `.worktreeinclude` entries. |
 | `.claude/agents/cope-scout.md` | Sonnet (briefs) / Haiku (voting) | Saves a compact brief (files, conventions, check commands) with `cope-wt brief save`, and replies with only its path, the checks, and whether existing tests cover the target. In question mode, Haiku scouts vote. |
 | `.claude/agents/cope-oracle.md` | Sonnet | Writes the shared acceptance tests that define a pass, before any code exists. |
@@ -34,7 +37,7 @@ select  one passer → apply · identical → apply · distinct → Sonnet picke
 Effort levels are set explicitly in each agent's file, so they don't depend on how the cascade is launched:
 - **low:** the orchestrator and the verifier, which do routing and mechanical checks.
 - **medium:** the scout, the picker, the executor (both its Haiku and Sonnet runs), and the planner, which writes 1–2 sentences.
-- **high:** the profiler, the test-writer, and the Opus fallback, whose output decides correctness or runs only after cheaper attempts failed.
+- **high:** the interpreter, the profiler, the test-writer, and the Opus fallback, whose output decides correctness or runs only after cheaper attempts failed.
 
 In test runs, thinking was 0–11% of each agent's output, so these levels are mostly about predictability, not cost.
 
@@ -91,6 +94,7 @@ Knobs (environment variables):
 - `COPE_MAX_DIFF_LINES`: above this, the picker is skipped and the smallest diff wins. Default 1500.
 - `COPE_SNAPSHOT_MAX_AGE`: default 43200 seconds.
 - `COPE_USAGE_LOG`: default `~/.claude/cope-usage.tsv`.
+- `COPE_LOG`: the per-run log that `cope-wt log` writes, default `~/.claude/cope-log.tsv`.
 - `COPE_RUN`: overrides the run key.
 
 ## How this follows the paper
@@ -133,7 +137,7 @@ What these runs show:
 - **A real bug was fixed:** the Agent tool runs subagents in the background by default, so `cope.md` requires `run_in_background: false`.
 - **Untested:** the `DEPTH-LIMIT` branch, because a forked `/cope` still spawned workers with the depth cap at 1.
 
-Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 43-check scripted test against throwaway repos, covering:
+Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 46-check scripted test against throwaway repos, covering:
 - the snapshot of dirty and untracked state, with the main tree and index left untouched,
 - dependency copying,
 - pass counting, oracle tampering, and `DECISION` lines (APPLY, PICK, NONE-PASSED),
@@ -143,7 +147,7 @@ Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway r
 - per-run isolation and its fallbacks, and `cleanup --all`,
 - the plain-worktree fallback and hook-remove,
 - both Python import cases,
-- the usage hook (dedupe, filtering, always exit 0) and the report,
+- the usage hook (dedupe, filtering, always exit 0, waiting for a still-streaming final message without blocking) and the report,
 - brief storage (git-dir location, surviving mid-run cleanup, `--final`) and `verify --apply`,
 - profile parsing, and `.worktreeinclude` merged with the default dependency list.
 
