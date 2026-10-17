@@ -21,6 +21,7 @@ TASK, and a BRIEF (relevant files, conventions, check commands). The BRIEF is us
    Use 2-5 tests. Keep them strict about outcomes and loose about how the outcome is produced.
 3. Run the new tests. They must **fail on the current code for the right reason**: an assertion about the missing or incorrect behavior, not an import error, syntax error, or broken fixture. A test that has to import a symbol the task creates is fine, as long as that's the only reason it fails. Fix the tests until that holds.
 4. Don't touch any non-test file.
+5. **Build safely:** to build or test, use only the `Check:` command from the COPE block in CLAUDE.md, when there is one. Plain build commands there may have side effects, such as copying into a game install. Never run deploy, publish, or install commands.
 
 ## Reply with only this (under 80 words)
 ```

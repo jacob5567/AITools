@@ -24,6 +24,7 @@ If told you are in an isolated worktree, your current directory is a private cop
 3. If the project has tests and the change alters behavior, add or update a focused test next to the existing ones.
 4. You may run the targeted test command from the BRIEF to self-check. You get at most 2 fix attempts. After that, stop and report. Don't loop.
 5. Never weaken, skip, or delete tests or checks to make them pass.
+6. **Build safely:** to build or test, use only the `Check:` command from the COPE block in CLAUDE.md, when there is one. Plain build commands there may have side effects, such as copying into a game install. Never run deploy, publish, or install commands.
 
 ## Reply with only this (under 150 words, no diffs, no code blocks)
 ```
@@ -33,5 +34,6 @@ CHANGED: path:line-range, one per line
 TESTS: added/updated <names> | none (why)
 SELF-CHECK: pass | fail | not run
 NOTES: max 3 bullets, only things the orchestrator must know
+MANUAL-CHECK: (only when asked) 2-4 short things to verify by hand
 STATUS: DONE | BLOCKED: <reason>
 ```

@@ -3,6 +3,10 @@
 This is a token-saving agent cascade based on [*Efficient LLM Collaboration via Planning*](https://arxiv.org/html/2506.11578v5) (COPE). In the paper, the large model mostly writes **short plans**, and cheap models do the bulk of the generation. The large model executes only when a mechanical confidence check fails. The paper reports roughly 26-74% lower paid-API cost at comparable accuracy.
 
 ```
+profile first run in a repo: Sonnet profiler writes a build/test block into CLAUDE.md
+        (safe check command, test signal, hazards, baseline); later runs read it for free
+weak    compile-only / no tests → Opus plan (if not small) → 1× Sonnet → builds? → apply
+        + a manual test checklist; no Haiku sampling or oracle
 triage  trivial → 1× Haiku · small → 1× Sonnet   (one worktree, verified; on failure → setup, then S2)
 setup   Sonnet scout → brief;  Sonnet oracle → shared failing tests;  cope-wt snapshot
 S1      2× Haiku in worktrees (+2 more if none pass)                  accept as soon as ≥1 passes
@@ -16,6 +20,7 @@ select  one passer → apply · identical → apply · distinct → Sonnet picke
 | File | Model | Job |
 |---|---|---|
 | `.claude/agents/cope.md` | Sonnet | Orchestrator. It has only `Bash` and an `Agent` tool limited to the cope agents, so it can't read code. It skips CLAUDE.md, passes the brief by path, and chains its shell steps. |
+| `.claude/agents/cope-profiler.md` | Sonnet | Runs once per repo. It finds the safe check command, what a pass proves (`tests` / `compile-only` / `none`), build side effects, the gitignored files builds need, and today's baseline. It writes them to a marked block in CLAUDE.md and adds `.worktreeinclude` entries. |
 | `.claude/agents/cope-scout.md` | Sonnet (briefs) / Haiku (voting) | Saves a compact brief (files, conventions, check commands) with `cope-wt brief save`, and replies with only its path, the checks, and whether existing tests cover the target. In question mode, Haiku scouts vote. |
 | `.claude/agents/cope-oracle.md` | Sonnet | Writes the shared acceptance tests that define a pass, before any code exists. |
 | `.claude/agents/cope-executor.md` | Haiku (S1) / Sonnet (S2, small tasks) | Implements the change in its own worktree. The model is overridden per stage. |
@@ -48,13 +53,23 @@ Two logs help with tuning:
 - **`~/.claude/cope-log.tsv`** gets one line per run, written by the orchestrator: the path taken, candidates spawned, the accepting stage, and the models used.
 - **`~/.claude/cope-usage.tsv`** gets one line per cope agent and model, written by the `SubagentStop` hook: input, cache-write, cache-read, and output tokens. To see the totals, run `cope-wt report [N]`, which summarizes the last N runs per agent and model.
 
+## Projects without tests
+
+The cascade accepts the first candidate that passes, so it's only as good as its checks. On the first `/cope` in a repo, the profiler records what a pass means, and the orchestrator routes on it:
+- **`tests`:** the normal cascade.
+- **`compile-only` or `none`:** for example, game mods tested in-game, or UI checked by eye. Haiku sampling would just accept the first attempt that builds. These repos get one Sonnet attempt instead, guided by an Opus plan when the task isn't small. The executor is told not to add a test framework, and the report starts with `UNVERIFIED BEHAVIOR` and a manual test checklist.
+- **A failing baseline** stops the run with `BASELINE-FAIL`, unless the task is to fix those failures.
+- **Build side effects** found by the profiler, like a post-build copy into a mod-manager profile, are folded into the profile's `Check:` command. Every agent is told to build only with that command.
+
+The profile block is plain Markdown between `<!-- cope:profile -->` markers, so you can edit it. Delete it to force a re-profile. `cope-wt profile` prints its fields.
+
 ## How worktree sampling works
 
 - **The brief** is stored in the main repo's git directory (`.git/cope/<run>/brief.md`), so every worktree can read it and git and test runners never see it. Mid-run cleanups keep it, and `cleanup --final` removes it.
 - **Runs are per session.** The snapshot ref (`refs/cope/<run>/snapshot`) and the worktree folder (`~/.cache/cope-worktrees/<repo>/<run>/`) are keyed by the Claude Code session ID. That way, `/cope` runs in the same repo from different sessions never touch each other's candidates. If the hook can't match a session but exactly one fresh run exists, it uses that run. Each decision is written to `~/.cache/cope-worktrees/hook.log`.
 - **The snapshot.** `cope-wt snapshot` commits your working tree, including uncommitted and untracked files, using a throwaway index. Your index and files are never touched.
 - **The hooks.** The `WorktreeCreate` hook (`cope-wt hook-create`) builds each `isolation: "worktree"` subagent's tree from that snapshot, outside the repo, so your test runners never discover the copies.
-- **Dependencies.** Gitignored dependency folders are copied with `cp --reflink=auto`. That's instant and nearly free on btrfs or XFS, and a full copy elsewhere. The folders come from `.worktreeinclude` (one path or glob per line), or by default `node_modules .venv venv vendor target`.
+- **Dependencies.** Gitignored dependency folders are copied with `cp --reflink=auto`. That's instant and nearly free on btrfs or XFS, and a full copy elsewhere. The folders come from `.worktreeinclude` (one path or glob per line), plus by default `node_modules .venv venv vendor target`.
 - **Other worktree uses.** When no fresh snapshot exists (none in the last 12 h), the hook behaves like a plain worktree: branch `worktree-<name>` from **HEAD** in `.claude/worktrees/<name>`. One difference: Claude Code's built-in default starts from `origin/<default-branch>`, not HEAD.
 - **Verification.**
   - `cope-wt verify` checks only candidates it hasn't seen in this run, so a second batch doesn't re-test the first.
@@ -111,7 +126,7 @@ What these runs show:
 - **A real bug was fixed:** the Agent tool runs subagents in the background by default, so `cope.md` requires `run_in_background: false`.
 - **Untested:** the `DEPTH-LIMIT` branch, because a forked `/cope` still spawned workers with the depth cap at 1.
 
-Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 40-check scripted test against throwaway repos, covering:
+Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 43-check scripted test against throwaway repos, covering:
 - the snapshot of dirty and untracked state, with the main tree and index left untouched,
 - dependency copying,
 - pass counting, oracle tampering, and `DECISION` lines (APPLY, PICK, NONE-PASSED),
@@ -122,7 +137,8 @@ Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway r
 - the plain-worktree fallback and hook-remove,
 - both Python import cases,
 - the usage hook (dedupe, filtering, always exit 0) and the report,
-- brief storage (git-dir location, surviving mid-run cleanup, `--final`) and `verify --apply`.
+- brief storage (git-dir location, surviving mid-run cleanup, `--final`) and `verify --apply`,
+- profile parsing, and `.worktreeinclude` merged with the default dependency list.
 
 ## License
 

@@ -14,7 +14,7 @@ CHANGED files and line ranges, CHECKS commands (if known), and optionally WORKTR
 Parallel candidates in worktrees are verified by `cope-wt verify`, not by you. You cover single-attempt runs and check discovery.
 
 ## Procedure
-1. Choose the checks. Use the given CHECKS commands. Otherwise detect them from the project config (package.json scripts, Makefile, pyproject/tox, Cargo, go.mod, CI workflow, CLAUDE.md). Scope them to the changed area where the tool allows it (a single test file or package, lint on the changed files).
+1. Choose the checks. Use the given CHECKS commands, or the `Check:` line in CLAUDE.md's COPE block. Plain build commands there may have side effects, such as copying into a game install. Never run deploy, publish, or install commands. Otherwise detect them from the project config (package.json scripts, Makefile, pyproject/tox, Cargo, go.mod, CI workflow, CLAUDE.md). Scope them to the changed area where the tool allows it (a single test file or package, lint on the changed files).
 2. Run, in this order, whichever exist: typecheck/compile, targeted tests, lint on the changed files. Pipe long output through `tail -n 60` or grep for errors. Never dump full logs.
 3. Coverage: find out whether at least one executed test actually exercises the changed code. Grep the tests for the changed symbols, or check the test names that ran.
 

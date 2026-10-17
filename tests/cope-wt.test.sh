@@ -124,6 +124,31 @@ bp=$(printf 'FILES: calc.py\n' | COPE_RUN=br $W brief save)
 COPE_RUN=br $W cleanup >/dev/null; [[ $(COPE_RUN=br $W brief path) == "$bp" ]] && ok "brief survives mid-run cleanup" || bad "brief lost on cleanup"
 COPE_RUN=br $W cleanup --final >/dev/null; COPE_RUN=br $W brief path >/dev/null 2>&1 && bad "brief kept after --final" || ok "cleanup --final removes brief"
 
+# Profile block parsing, and .worktreeinclude merged with the default deps.
+cd "$R"
+[[ $($W profile) == "PROFILE: none" ]] && ok "profile: none without CLAUDE.md" || bad "profile none"
+cat > CLAUDE.md <<'EOF'
+# Notes
+Keep this line.
+<!-- cope:profile -->
+## Build and test notes (maintained by COPE; edit freely)
+- Check: `dotnet build -c Release -p:CopyToProfile=false`
+- Test signal: compile-only: builds, but behavior is only checked in-game
+- Oracle: not-possible: code runs only inside the game
+- Hazards: plain dotnet build copies the DLL into the r2modman profile
+- Worktree needs: Directory.Build.props.user
+- Baseline: pass (2026-10-16, abc1234)
+<!-- /cope:profile -->
+EOF
+out=$($W profile)
+grep -qx 'CHECK: dotnet build -c Release -p:CopyToProfile=false' <<<"$out" && grep -qx 'SIGNAL: compile-only' <<<"$out" \
+  && grep -q '^ORACLE: not-possible' <<<"$out" && grep -q '^HAZARDS: plain dotnet' <<<"$out" && grep -q '^BASELINE: pass' <<<"$out" \
+  && ok "profile: fields parsed" || { bad "profile parse"; echo "$out"; }
+printf 'local.user\n' > .worktreeinclude; printf '*.user\n' >> .gitignore; echo cfg > local.user
+$W snapshot >/dev/null; wt=$(echo '{"name":"inc","cwd":"'"$R"'"}' | $W hook-create 2>/dev/null)
+[[ -f $wt/local.user && -f $wt/node_modules/dep/x ]] && ok ".worktreeinclude merged with default deps" || bad "worktreeinclude merge"
+$W cleanup --final >/dev/null; rm -f CLAUDE.md .worktreeinclude local.user; git checkout -q .gitignore
+
 # Usage hook: fake transcript with a duplicated streamed message id.
 T=$S/fake-transcript.jsonl
 cat > "$T" <<'EOF'

@@ -11,6 +11,7 @@
 #                                     --apply: on DECISION APPLY, also apply it and run cleanup --final
 #   cope-wt diffs [--summary] SHA...  candidate diffs vs the snapshot (IDENTICAL / TOO-LARGE shortcuts)
 #   cope-wt apply SHA                 apply a candidate's diff to the main working tree
+#   cope-wt profile                   print the COPE profile block from the repo's CLAUDE.md (or PROFILE: none)
 #   cope-wt brief save|path           store the scout's brief from stdin (prints its path) / print the path
 #   cope-wt cleanup [--final|--all]   remove this run's worktrees and snapshot (--final: also its brief;
 #                                     --all: every run in this repo)
@@ -77,14 +78,13 @@ snap_is_fresh() {
 # Copy gitignored dependency dirs/files from the main tree into a worktree (reflink on btrfs/xfs).
 copy_deps() {
   local root=$1 wt=$2 mode=$3 p entries=()
+  [[ $mode == snapshot ]] && entries=("${DEFAULT_DEPS[@]}")
   if [[ -f $root/.worktreeinclude ]]; then
     while IFS= read -r p; do
       p=${p%%#*}; p=${p#/}; p=${p%/}; p=${p//[[:space:]]/}
       [[ -z $p || $p == !* ]] && continue
       entries+=("$p")
     done < "$root/.worktreeinclude"
-  elif [[ $mode == snapshot ]]; then
-    entries=("${DEFAULT_DEPS[@]}")
   fi
   local e src rel
   for e in "${entries[@]}"; do
@@ -237,6 +237,21 @@ for s in order[-int(sys.argv[2]):]:
     for model, t in sorted(tot.items()):
         print(f"  {'TOTAL':20} {model:12}     in={t[0]:>7} cache_write={t[1]:>8} cache_read={t[2]:>9} out={t[3]:>7}")
 PY
+}
+
+# Summarize the cope:profile block that cope-profiler writes into CLAUDE.md.
+cmd_profile() {
+  local root f
+  root=$(main_root 2>/dev/null) || root=$PWD
+  f=$root/CLAUDE.md
+  if [[ ! -f $f ]] || ! grep -q '^<!-- cope:profile -->' "$f"; then echo "PROFILE: none"; return 0; fi
+  echo "PROFILE: present"
+  sed -n '/^<!-- cope:profile -->/,/^<!-- \/cope:profile -->/p' "$f" | sed -nE '
+    s/^- Check: *`?([^`]*)`? *$/CHECK: \1/p
+    s/^- Test signal: *([a-z-]+).*$/SIGNAL: \1/p
+    s/^- Oracle: *(.*)$/ORACLE: \1/p
+    s/^- Hazards: *(.*)$/HAZARDS: \1/p
+    s/^- Baseline: *(.*)$/BASELINE: \1/p'
 }
 
 cmd_list() {
@@ -461,5 +476,6 @@ case ${1:-} in
   cleanup) shift; cmd_cleanup "$@" ;;
   report) shift; cmd_report "$@" ;;
   brief) shift; cmd_brief "$@" ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  profile) shift; cmd_profile "$@" ;;
+  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
