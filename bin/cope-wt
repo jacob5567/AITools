@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# cope-wt: git worktree plumbing for the COPE cascade (see README.md).
+#
+#   cope-wt snapshot                  commit the dirty working tree (index untouched) as this run's candidate base
+#   cope-wt hook-create               WorktreeCreate hook: JSON on stdin, prints the new worktree path
+#   cope-wt hook-remove               WorktreeRemove hook: JSON on stdin
+#   cope-wt hook-usage                SubagentStop hook: logs token usage of cope* agents to ~/.claude/cope-usage.tsv
+#   cope-wt list                      this run's candidate worktrees
+#   cope-wt verify --checks CMD [--checks CMD]... [--oracle "PATHS"] [--parallel] [--all] [--apply] [WT...]
+#                                     check candidates not yet verified (or WT.../--all), then print a DECISION line;
+#                                     --apply: on DECISION APPLY, also apply it and run cleanup --final
+#   cope-wt diffs [--summary] SHA...  candidate diffs vs the snapshot (IDENTICAL / TOO-LARGE shortcuts)
+#   cope-wt apply SHA                 apply a candidate's diff to the main working tree
+#   cope-wt brief save|path           store the scout's brief from stdin (prints its path) / print the path
+#   cope-wt cleanup [--final|--all]   remove this run's worktrees and snapshot (--final: also its brief;
+#                                     --all: every run in this repo)
+#   cope-wt report [N]                token usage per agent and model for the last N runs (default 5)
+#
+# Runs are keyed by the Claude Code session (CLAUDE_CODE_SESSION_ID, or COPE_RUN), so concurrent
+# /cope runs in one repo from different sessions never share snapshots or worktrees.
+set -euo pipefail
+
+SNAP_MAX_AGE=${COPE_SNAPSHOT_MAX_AGE:-43200}   # seconds; older snapshots are ignored by hook-create
+CHECK_TIMEOUT=${COPE_CHECK_TIMEOUT:-600}
+MAX_DIFF_LINES=${COPE_MAX_DIFF_LINES:-1500}
+USAGE_LOG=${COPE_USAGE_LOG:-$HOME/.claude/cope-usage.tsv}
+DEFAULT_DEPS=(node_modules .venv venv vendor target)
+# Artifacts that running checks creates; never part of a snapshot or a candidate even if not gitignored.
+JUNK=(':(exclude,glob)**/__pycache__/**' ':(exclude,glob)**/*.pyc' ':(exclude,glob)**/.pytest_cache/**'
+      ':(exclude,glob)**/.mypy_cache/**' ':(exclude,glob)**/.ruff_cache/**' ':(exclude,glob)**/.coverage'
+      ':(exclude,glob)**/coverage/**' ':(exclude,glob)**/.nyc_output/**' ':(exclude,glob)**/*.tsbuildinfo'
+      ':(exclude,glob)**/.DS_Store')
+export GIT_AUTHOR_NAME=cope GIT_AUTHOR_EMAIL=cope@localhost GIT_COMMITTER_NAME=cope GIT_COMMITTER_EMAIL=cope@localhost
+
+die() { echo "cope-wt: $*" >&2; exit 1; }
+
+run_id() { printf '%s' "${1:-${COPE_RUN:-${CLAUDE_CODE_SESSION_ID:-default}}}" | sha1sum | cut -c1-10; }
+RUN=$(run_id)
+
+common_dir() { git rev-parse --path-format=absolute --git-common-dir; }
+
+main_root() { dirname "$(common_dir)"; }
+
+repo_cache_dir() {
+  local h
+  h=$(common_dir | sha1sum | cut -c1-12)
+  echo "${XDG_CACHE_HOME:-$HOME/.cache}/cope-worktrees/$h"
+}
+
+cache_dir() { echo "$(repo_cache_dir)/$RUN"; }
+
+snap_ref() { echo "refs/cope/$RUN/snapshot"; }
+
+# Commit the working tree of $1 (all non-ignored files) on parent $2 using a throwaway index.
+tree_commit() {
+  local dir=$1 parent=${2:-} idx tree
+  idx=$(mktemp)
+  cp "$(git -C "$dir" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || rm -f "$idx"
+  GIT_INDEX_FILE=$idx git -C "$dir" add -A -- . "${JUNK[@]}"
+  tree=$(GIT_INDEX_FILE=$idx git -C "$dir" write-tree)
+  rm -f "$idx"
+  if [[ -n $parent ]]; then
+    git -C "$dir" commit-tree "$tree" -p "$parent" -m "cope candidate"
+  else
+    git -C "$dir" commit-tree "$tree" -m "cope candidate"
+  fi
+}
+
+snap_sha() { git rev-parse -q --verify "$(snap_ref)^{commit}" 2>/dev/null; }
+
+snap_is_fresh() {
+  local sha=$1 t
+  t=$(git log -1 --format=%ct "$sha")
+  (( $(date +%s) - t < SNAP_MAX_AGE ))
+}
+
+# Copy gitignored dependency dirs/files from the main tree into a worktree (reflink on btrfs/xfs).
+copy_deps() {
+  local root=$1 wt=$2 mode=$3 p entries=()
+  if [[ -f $root/.worktreeinclude ]]; then
+    while IFS= read -r p; do
+      p=${p%%#*}; p=${p#/}; p=${p%/}; p=${p//[[:space:]]/}
+      [[ -z $p || $p == !* ]] && continue
+      entries+=("$p")
+    done < "$root/.worktreeinclude"
+  elif [[ $mode == snapshot ]]; then
+    entries=("${DEFAULT_DEPS[@]}")
+  fi
+  local e src rel
+  for e in "${entries[@]}"; do
+    for src in "$root"/$e; do
+      [[ -e $src ]] || continue
+      rel=${src#"$root"/}
+      git -C "$root" check-ignore -q "$rel" || continue   # tracked files are already in the worktree
+      [[ -e $wt/$rel ]] && continue
+      mkdir -p "$(dirname "$wt/$rel")"
+      cp -a --reflink=auto "$src" "$wt/$rel"
+    done
+  done
+}
+
+cmd_snapshot() {
+  local sha parent=""
+  git rev-parse -q --verify HEAD >/dev/null && parent=HEAD
+  sha=$(tree_commit "$(git rev-parse --show-toplevel)" "$parent")
+  git update-ref "$(snap_ref)" "$sha"
+  rm -rf "$(cache_dir)/.results"
+  echo "$sha"
+}
+
+# Pick this session's snapshot; if the hook can't tell sessions apart, accept exactly one fresh run.
+resolve_run_for_hook() {
+  local sid=$1 ref sha fresh=()
+  [[ -n $sid ]] && RUN=$(run_id "$sid")
+  if sha=$(snap_sha) && snap_is_fresh "$sha"; then hook_log "session-match run=$RUN"; return 0; fi
+  while IFS= read -r ref; do
+    sha=$(git rev-parse "$ref^{commit}")
+    snap_is_fresh "$sha" && fresh+=("$ref")
+  done < <(git for-each-ref --format='%(refname)' 'refs/cope/*/snapshot')
+  if ((${#fresh[@]} == 1)); then
+    RUN=$(cut -d/ -f3 <<<"${fresh[0]}")
+    hook_log "single-run-fallback run=$RUN (session $sid had no snapshot)"
+    return 0
+  fi
+  hook_log "no-snapshot (${#fresh[@]} fresh runs) -> plain worktree"
+  return 1
+}
+
+hook_log() {
+  local f="${XDG_CACHE_HOME:-$HOME/.cache}/cope-worktrees/hook.log"
+  mkdir -p "$(dirname "$f")" && echo "$(date +%FT%T) $(basename "$(main_root)") $*" >> "$f" || true
+}
+
+cmd_hook_create() {
+  local input cwd name sid root sha path
+  input=$(cat)
+  cwd=$(jq -r '.cwd // empty' <<<"$input")
+  sid=$(jq -r '.session_id // empty' <<<"$input")
+  name=$(jq -r '.name // empty' <<<"$input" | tr -c 'A-Za-z0-9._\n-' '_')
+  [[ -n $name ]] || name="wt-$(date +%s)-$$"
+  [[ -n $cwd ]] && cd "$cwd"
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository: $PWD"
+  root=$(main_root)
+  if resolve_run_for_hook "$sid"; then
+    sha=$(snap_sha)
+    path="$(cache_dir)/$name"
+    mkdir -p "$(dirname "$path")"
+    git -C "$root" worktree add --detach "$path" "$sha" >&2
+    copy_deps "$root" "$path" snapshot
+  else
+    path="$root/.claude/worktrees/$name"
+    if git -C "$root" rev-parse -q --verify "refs/heads/worktree-$name" >/dev/null; then
+      git -C "$root" worktree add "$path" "worktree-$name" >&2
+    else
+      git -C "$root" worktree add -b "worktree-$name" "$path" HEAD >&2
+    fi
+    copy_deps "$root" "$path" default
+  fi
+  echo "$path"
+}
+
+cmd_hook_remove() {
+  local input path
+  input=$(cat)
+  path=$(jq -r '.worktree_path // empty' <<<"$input")
+  [[ -n $path && -d $path ]] || exit 0
+  git -C "$path" worktree remove --force "$path" >&2 2>/dev/null || rm -rf "$path"
+}
+
+# SubagentStop hook. Must never fail or print to stdout: a non-zero exit could block the agent from stopping.
+cmd_hook_usage() {
+  local input cwd repo=""
+  input=$(cat) || exit 0
+  cwd=$(jq -r '.cwd // empty' <<<"$input" 2>/dev/null) || cwd=""
+  # Agents in candidate worktrees report the worktree as cwd; name the main repo instead.
+  [[ -n $cwd ]] && repo=$(cd "$cwd" 2>/dev/null && basename "$(main_root)" 2>/dev/null) || repo=$(basename "${cwd:-?}")
+  python3 -I -c "$(cat <<'PY'
+import json, sys, os, time
+ev = json.loads(sys.stdin.read())
+agent = ev.get("agent_type") or ""
+path = ev.get("agent_transcript_path") or ""
+if not agent.startswith("cope") or not os.path.isfile(path):
+    sys.exit(0)
+last = {}
+for line in open(path, encoding="utf-8", errors="replace"):
+    try:
+        e = json.loads(line)
+    except ValueError:
+        continue
+    m = e.get("message") or {}
+    if e.get("type") == "assistant" and "usage" in m:
+        last[m.get("id")] = (m.get("model", "?"), m["usage"])
+by_model = {}
+for model, u in last.values():
+    t = by_model.setdefault(model, [0, 0, 0, 0])
+    for i, k in enumerate(("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")):
+        t[i] += u.get(k) or 0
+log = sys.argv[1]
+new = not os.path.exists(log)
+with open(log, "a") as f:
+    if new:
+        f.write("time\tsession\trepo\tagent\tmodel\tinput\tcache_write\tcache_read\toutput\n")
+    for model, t in by_model.items():
+        f.write("\t".join([time.strftime("%Y-%m-%dT%H:%M:%S"), (ev.get("session_id") or "")[:8],
+                           sys.argv[2], agent, model.replace("claude-", "")]
+                          + [str(x) for x in t]) + "\n")
+PY
+)" "$USAGE_LOG" "$repo" <<<"$input" >/dev/null 2>&1 || true
+  exit 0
+}
+
+cmd_report() {
+  local n=${1:-5}
+  [[ -f $USAGE_LOG ]] || die "no usage log yet at $USAGE_LOG (is the SubagentStop hook installed?)"
+  python3 -I - "$USAGE_LOG" "$n" <<'PY'
+import csv, sys, collections
+rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
+order = []
+for r in rows:
+    if r["session"] not in order:
+        order.append(r["session"])
+for s in order[-int(sys.argv[2]):]:
+    rs = [r for r in rows if r["session"] == s]
+    print(f"== session {s}  repo={rs[0]['repo']}  {rs[0]['time']} .. {rs[-1]['time'][11:]}")
+    agg = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
+    for r in rs:
+        a = agg[(r["agent"], r["model"])]
+        a[0] += 1
+        for i, k in enumerate(("input", "cache_write", "cache_read", "output"), 1):
+            a[i] += int(r[k])
+    tot = collections.defaultdict(lambda: [0, 0, 0, 0])
+    for (agent, model), a in sorted(agg.items()):
+        print(f"  {agent:20} {model:12} x{a[0]:<2} in={a[1]:>7} cache_write={a[2]:>8} cache_read={a[3]:>9} out={a[4]:>7}")
+        t = tot[model]
+        for i in range(4):
+            t[i] += a[i + 1]
+    for model, t in sorted(tot.items()):
+        print(f"  {'TOTAL':20} {model:12}     in={t[0]:>7} cache_write={t[1]:>8} cache_read={t[2]:>9} out={t[3]:>7}")
+PY
+}
+
+cmd_list() {
+  local d
+  d=$(cache_dir)
+  [[ -d $d ]] || return 0
+  find "$d" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | sort
+}
+
+# Python projects: make the worktree's code win the import, and refuse to PASS if it doesn't.
+python_guard() {
+  local wt=$1 pkg py out
+  [[ -f $wt/pyproject.toml ]] || return 0
+  pkg=$(python3 -I -c 'import sys,tomllib;print(tomllib.load(open(sys.argv[1],"rb")).get("project",{}).get("name",""))' "$wt/pyproject.toml" 2>/dev/null || true)
+  [[ -n $pkg ]] || return 0
+  pkg=${pkg//-/_}; pkg=${pkg//./_}
+  py=python3; [[ -x $wt/.venv/bin/python ]] && py=$wt/.venv/bin/python
+  # -P: don't put the cwd on sys.path, so resolution matches what a test runner sees via PYTHONPATH.
+  "$py" -P -c '' 2>/dev/null && py="$py -P"
+  out=$(cd "$wt" && $py -c "import os,$pkg as m;print(os.path.realpath(getattr(m,'__file__',None) or list(m.__path__)[0]))" 2>/dev/null) || return 0
+  [[ $out == "$(realpath "$wt")"/* ]] || { echo "import of '$pkg' resolves outside the worktree: $out"; return 1; }
+}
+
+verify_one() {
+  local wt=$1 oracle=$2; shift 2
+  local snap sha log status=PASS detail="" c g
+  snap=$(snap_sha) || die "no snapshot; run cope-wt snapshot first"
+  sha=$(tree_commit "$wt" "$snap")   # before the checks run, so their artifacts aren't part of the candidate
+  log=$(mktemp)
+  (
+    cd "$wt"
+    if [[ -f pyproject.toml || -f setup.py || -f setup.cfg ]]; then
+      export PYTHONPATH="$wt${PYTHONPATH:+:$PYTHONPATH}"
+      [[ -d src ]] && export PYTHONPATH="$wt/src:$PYTHONPATH"
+    fi
+    if [[ -n $oracle ]] && ! git diff --quiet "$snap" -- $oracle; then
+      echo "ORACLE-TAMPERED: $(git diff --name-only "$snap" -- $oracle | tr '\n' ' ')"; exit 3
+    fi
+    g=$(python_guard "$wt") || { echo "$g"; exit 4; }
+    for c in "$@"; do
+      echo "\$ $c"
+      timeout "$CHECK_TIMEOUT" bash -c "$c" || { echo "[exit $?] $c"; exit 1; }
+    done
+  ) >"$log" 2>&1 || {
+    case $? in 3) status=TAMPERED ;; 4) status=ENV-FAIL ;; *) status=FAIL ;; esac
+    detail=$(tail -n 15 "$log")
+  }
+  rm -f "$log"
+  local stat
+  stat=$(git diff --numstat "$snap" "$sha" | awk '{f++; a+=$1; d+=$2} END{if (f) printf "%d files +%d -%d", f, a, d}')
+  [[ -n $stat ]] || { stat="no changes"; [[ $status == PASS ]] && status=NO-CHANGE; }
+  printf '%s %s %s | %s\n' "$status" "$sha" "$wt" "$stat"
+  [[ -n $detail ]] && sed 's/^/    /' <<<"$detail"
+  return 0
+}
+
+# Prints IDENTICAL <sha> | TOO-LARGE <sha> ... | DISTINCT <n> ..., or the full diffs.
+diffs_core() {
+  local summary=$1; shift
+  local snap s
+  snap=$(snap_sha) || die "no snapshot"
+  local -A seen=(); local total=0 smallest="" small_n=-1 n h
+  for s in "$@"; do
+    h=$(git diff -w -U0 "$snap" "$s" | grep -E '^[+-]' | tr -d '[:space:]' | sha1sum | cut -c1-12)
+    seen[$h]=1
+    n=$(git diff --numstat "$snap" "$s" | awk '{a+=$1+$2} END{print a+0}')
+    total=$((total + n))
+    if ((small_n < 0 || n < small_n)); then small_n=$n; smallest=$s; fi
+  done
+  if ((${#seen[@]} == 1)); then echo "IDENTICAL $smallest"; return; fi
+  if ((total > MAX_DIFF_LINES)); then echo "TOO-LARGE $smallest ($total lines; picked smallest)"; return; fi
+  if ((summary)); then echo "DISTINCT ${#seen[@]} ($total lines)"; return; fi
+  for s in "$@"; do
+    echo "===== CANDIDATE $s"
+    git diff --stat=100 "$snap" "$s" | tail -n 1
+    git diff -U3 "$snap" "$s"
+  done
+}
+
+cmd_verify() {
+  local checks=() oracle="" parallel=0 all=0 wts=() explicit=0 do_apply=0
+  while (($#)); do
+    case $1 in
+      --checks) checks+=("$2"); shift 2 ;;
+      --oracle) oracle=$2; shift 2 ;;
+      --parallel) parallel=1; shift ;;
+      --all) all=1; shift ;;
+      --apply) do_apply=1; shift ;;
+      *) wts+=("$1"); explicit=1; shift ;;
+    esac
+  done
+  ((${#checks[@]})) || die "verify needs at least one --checks command"
+  local res wt name
+  res="$(cache_dir)/.results"; mkdir -p "$res"
+  if ((!explicit)); then
+    while IFS= read -r wt; do
+      name=$(basename "$wt")
+      ((all)) || [[ ! -f $res/$name ]] && wts+=("$wt")
+    done < <(cmd_list)
+  fi
+  if ((${#wts[@]} == 0)) && [[ -z $(cmd_list) ]]; then
+    die "NO-CANDIDATES: no worktrees under $(cache_dir). The WorktreeCreate hook is probably not installed (run install.sh --hooks)."
+  fi
+  if ((parallel)); then
+    for wt in "${wts[@]}"; do verify_one "$wt" "$oracle" "${checks[@]}" >"$res/$(basename "$wt")" & done
+    wait
+  else
+    for wt in "${wts[@]}"; do verify_one "$wt" "$oracle" "${checks[@]}" >"$res/$(basename "$wt")"; done
+  fi
+  local batch_pass=0
+  for wt in "${wts[@]}"; do
+    cat "$res/$(basename "$wt")"
+    grep -q '^PASS ' "$res/$(basename "$wt")" && batch_pass=$((batch_pass + 1))
+  done
+  # Decision over every candidate verified in this run so far (earlier batches included).
+  local pass=() total=0 f s sha
+  for f in "$res"/*; do
+    [[ -f $f ]] || continue
+    total=$((total + 1))
+    read -r s sha _ < "$f"
+    [[ $s == PASS ]] && pass+=("$sha")
+  done
+  echo "PASSED ${#pass[@]}/$total (this batch: $batch_pass/${#wts[@]})"
+  if ((${#pass[@]} == 0)); then
+    echo "DECISION: NONE-PASSED"
+    return 0
+  fi
+  local pick="" d
+  if ((${#pass[@]} == 1)); then
+    pick=${pass[0]}; echo "DECISION: APPLY $pick"
+  else
+    d=$(diffs_core 1 "${pass[@]}")
+    case $d in
+      IDENTICAL*|TOO-LARGE*) pick=$(awk '{print $2}' <<<"$d"); echo "DECISION: APPLY $pick ($d)" ;;
+      *) echo "DECISION: PICK ${pass[*]} ($d)" ;;
+    esac
+  fi
+  if [[ -n $pick ]] && ((do_apply)); then
+    cmd_apply "$pick" && cmd_cleanup --final
+  fi
+}
+
+cmd_diffs() {
+  local summary=0
+  [[ ${1:-} == --summary ]] && { summary=1; shift; }
+  (($#)) || die "diffs needs candidate SHAs"
+  diffs_core "$summary" "$@"
+}
+
+cmd_apply() {
+  local sha=${1:?usage: cope-wt apply SHA} snap root patch
+  snap=$(snap_sha) || die "no snapshot"
+  root=$(main_root)
+  patch="$(cache_dir).patch"
+  mkdir -p "$(dirname "$patch")"
+  git -C "$root" diff --binary "$snap" "$sha" >"$patch"
+  if git -C "$root" apply --check "$patch" 2>/dev/null; then
+    git -C "$root" apply "$patch"
+    rm -f "$patch"
+    echo "APPLIED $sha"
+    git -C "$root" diff --stat "$snap" "$sha" | tail -n 1
+  else
+    echo "CONFLICT: main tree changed since the snapshot; patch saved at $patch"
+    git -C "$root" apply --check "$patch" 2>&1 | head -n 10 || true
+    return 1
+  fi
+}
+
+# The brief lives in the main repo's git dir: readable from every worktree, invisible to git and test runners.
+run_state_dir() { echo "$(common_dir)/cope/$RUN"; }
+
+cmd_brief() {
+  local f
+  f="$(run_state_dir)/brief.md"
+  case ${1:-} in
+    save) mkdir -p "$(dirname "$f")"; cat > "$f"; [[ -s $f ]] || die "empty brief"; echo "$f" ;;
+    path) [[ -f $f ]] || die "no brief saved for this run"; echo "$f" ;;
+    *) die "usage: cope-wt brief save|path" ;;
+  esac
+}
+
+cleanup_run() {
+  local wt n=0
+  while IFS= read -r wt; do
+    git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+    n=$((n + 1))
+  done < <(cmd_list)
+  rm -rf "$(cache_dir)/.results"
+  rmdir "$(cache_dir)" 2>/dev/null || true
+  git update-ref -d "$(snap_ref)" 2>/dev/null || true
+  echo "$n"
+}
+
+cmd_cleanup() {
+  local n=0 ref
+  if [[ ${1:-} == --all ]]; then
+    local d
+    for d in "$(repo_cache_dir)"/*/; do
+      [[ -d $d ]] || continue
+      RUN=$(basename "$d"); n=$((n + $(cleanup_run)))
+    done
+    while IFS= read -r ref; do git update-ref -d "$ref"; done < <(git for-each-ref --format='%(refname)' 'refs/cope/')
+    rm -rf "$(common_dir)/cope"
+  else
+    n=$(cleanup_run)
+    [[ ${1:-} == --final ]] && rm -rf "$(run_state_dir)"
+  fi
+  git worktree prune
+  rmdir "$(repo_cache_dir)" 2>/dev/null || true
+  echo "CLEANED $n worktree(s)"
+}
+
+case ${1:-} in
+  snapshot) shift; cmd_snapshot "$@" ;;
+  hook-create) shift; cmd_hook_create "$@" ;;
+  hook-remove) shift; cmd_hook_remove "$@" ;;
+  hook-usage) shift; cmd_hook_usage "$@" ;;
+  list) shift; cmd_list "$@" ;;
+  verify) shift; cmd_verify "$@" ;;
+  diffs) shift; cmd_diffs "$@" ;;
+  apply) shift; cmd_apply "$@" ;;
+  cleanup) shift; cmd_cleanup "$@" ;;
+  report) shift; cmd_report "$@" ;;
+  brief) shift; cmd_brief "$@" ;;
+  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
