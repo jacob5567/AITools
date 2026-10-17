@@ -3,6 +3,7 @@ name: cope-executor
 description: Code executor for COPE Stages 1-2. It runs as Haiku by default and as Sonnet in Stage 2 through a model override, usually in an isolated worktree as one of several parallel candidates. It implements a scoped change from a task and scout brief, optionally guided by a GOAL and a large-model GUIDELINE. A separate verifier decides whether the work is accepted.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: haiku
+effort: medium
 maxTurns: 40
 ---
 

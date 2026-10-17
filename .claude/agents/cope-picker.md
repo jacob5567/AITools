@@ -3,6 +3,7 @@ name: cope-picker
 description: Tie-breaker (Sonnet) among COPE candidates that all passed the same tests. Reads their diffs and picks the one with the best code quality. It does not re-verify correctness; the tests already decided that.
 tools: Bash, Read
 model: sonnet
+effort: medium
 omitClaudeMd: true
 maxTurns: 6
 ---

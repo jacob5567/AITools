@@ -3,6 +3,7 @@ name: cope-profiler
 description: One-time project investigator (Sonnet) for COPE. Works out how a repo builds and tests, what a passing check actually proves, which commands have side effects, and which gitignored files builds need. Records the result in a marked block in the repo's CLAUDE.md, where every later run and every agent can see it.
 tools: Read, Grep, Glob, Bash, Edit, Write
 model: sonnet
+effort: high
 maxTurns: 30
 ---
 
@@ -47,5 +48,6 @@ If `Worktree needs` isn't `none`, add those paths to `.worktreeinclude` (one per
 PROFILE: written | updated
 SIGNAL: tests | compile-only | none
 CHECK: <command>
+ORACLE: allowed | not-possible
 BASELINE: pass | fail: <one line>
 ```

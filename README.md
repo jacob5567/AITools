@@ -31,6 +31,13 @@ select  one passer → apply · identical → apply · distinct → Sonnet picke
 | `bin/cope-wt` | none (shell) | Snapshot, worktree and usage hooks, brief storage, incremental verification with a `DECISION` line (`--apply` also applies and cleans up), cleanup, and token reports. Uses zero tokens. |
 | `.claude/skills/cope/SKILL.md` | none | `/cope <task>` launcher. It has `context: fork` and `agent: cope`, so the cascade runs as a subagent. |
 
+Effort levels are set explicitly in each agent's file, so they don't depend on how the cascade is launched:
+- **low:** the orchestrator and the verifier, which do routing and mechanical checks.
+- **medium:** the scout, the picker, the executor (both its Haiku and Sonnet runs), and the planner, which writes 1–2 sentences.
+- **high:** the profiler, the test-writer, and the Opus fallback, whose output decides correctness or runs only after cheaper attempts failed.
+
+In test runs, thinking was 0–11% of each agent's output, so these levels are mostly about predictability, not cost.
+
 ## Install and use
 
 **Requirements:**

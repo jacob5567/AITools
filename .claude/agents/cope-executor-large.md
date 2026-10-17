@@ -3,6 +3,7 @@ name: cope-executor-large
 description: Large-model executor (Opus) for COPE Stage 3, the final fallback. Implements the task using only the large planner's GUIDELINE after the cheaper attempts failed verification. Also answers questions in Stage 3 of question mode.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: opus
+effort: high
 maxTurns: 60
 ---
 

@@ -3,6 +3,7 @@ name: cope-oracle
 description: Writes the shared acceptance tests (Sonnet) that every COPE candidate must pass, before any implementation exists. Runs once per task, in the main tree. Its tests are the confidence signal, so they decide what counts as correct.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: sonnet
+effort: high
 maxTurns: 30
 ---
 

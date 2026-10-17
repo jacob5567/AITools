@@ -3,6 +3,7 @@ name: cope-scout
 description: Read-only context gatherer. Use it before planning or editing to turn "find the relevant code" into a compact brief, so expensive models read the brief instead of the repo. Runs as Haiku by default (question-mode voting); the COPE orchestrator runs it as Sonnet for code-task briefs.
 tools: Read, Grep, Glob, Bash
 model: haiku
+effort: medium
 maxTurns: 25
 ---
 

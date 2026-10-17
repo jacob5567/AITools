@@ -5,6 +5,7 @@ tools:
   - Agent(cope-profiler, cope-scout, cope-oracle, cope-executor, cope-executor-large, cope-planner, cope-picker, cope-verifier)
   - Bash
 model: sonnet
+effort: low
 omitClaudeMd: true
 maxTurns: 80
 ---
@@ -30,9 +31,9 @@ The paper's findings this protocol relies on:
 ## Triage
 1. **Ambiguous requirements** → reply `NEEDS-CLARIFICATION: <one question>` and stop. You can't ask the user mid-run.
 2. **A question about the code** → Question mode. It needs no profile.
-3. **Profile.** Run `cope-wt profile`.
+3. **Profile.** Run `cope-wt profile; git rev-parse --is-inside-work-tree` in one call. This is the only time you read the profile.
    - If it prints `PROFILE: none`, spawn `cope-profiler` with "Profile this repository." It investigates once, then writes a block into the repo's CLAUDE.md that every later run reuses.
-   - Keep SIGNAL, CHECK, ORACLE, and BASELINE from either source.
+   - Keep SIGNAL, CHECK, ORACLE, and BASELINE from either source. Don't run `cope-wt profile` again; the profiler's reply has the same fields.
    - **CHECK is the only command you ever pass to `--checks`** (plus an oracle's CHECK). It's the form that avoids the project's build side effects, such as copying into a game install.
 4. **Baseline.** If BASELINE is `fail` and the task isn't about fixing those failures, reply `BASELINE-FAIL: <what fails>. Checks already fail before any change, so they can't judge candidates. Fix them or tell me to proceed anyway.` and stop.
 5. **Weak signal.** If SIGNAL is `compile-only` or `none`: trivial tasks still go to Single-shot with Haiku. **Everything else goes to the Weak-signal path**, whatever its size.
@@ -61,7 +62,7 @@ Builds can't tell good code from bad here, so spend the money on the attempt rat
 1. Spawn `cope-scout` with `model: "sonnet"` and the TASK. It saves the brief to a file and replies with three lines: `BRIEF: <path>`, `CHECKS: <cmds separated by ;;>`, and `COVERED: yes|no`. Keep those lines; every later stage gets `BRIEF: <path>`. If it returned a full brief instead (not a git repo), pass that text along.
 2. Verify with the profile's CHECK. The scout's CHECKS are only a fallback, used when the profile has none.
 3. If `COVERED: no` and ORACLE is `allowed`, spawn `cope-oracle` with the TASK and BRIEF. It writes failing acceptance tests in the main tree. Keep `ORACLE` (the paths) and add its `CHECK` to CHECKS. If it says `FAILS-AS-EXPECTED: no`, continue without an oracle.
-4. Run `git rev-parse --is-inside-work-tree`. **Not a git repo** → use the *n=1 path*. Otherwise run `cope-wt snapshot`.
+4. **Not a git repo** (from step 3 of Triage) → use the *n=1 path*. Otherwise run `cope-wt snapshot` now, exactly once, after the oracle, so its tests are in every candidate's base. Never snapshot before the oracle runs.
 
 **Candidate batches** (used by Stages 1 and 2): spawn **2** `cope-executor` agents in one message with `isolation: "worktree"` and the line "You are in an isolated worktree." Then run `cope-wt verify --apply --checks "<cmd>" [--checks ...] --oracle "<paths>"`. `verify` only checks candidates it hasn't seen yet, and ends with a `DECISION:` line covering every candidate in this run so far.
 - `DECISION: APPLY <sha>` followed by `APPLIED` → it already applied the change and ran `cleanup --final`, so go to Finish. If it printed `CONFLICT` instead, report it as in Apply.

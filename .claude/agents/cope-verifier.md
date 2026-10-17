@@ -3,6 +3,7 @@ name: cope-verifier
 description: Mechanical confidence signal (Haiku) for COPE. Runs tests, typecheck, lint, and build for the changed area, then returns PASS/FAIL/UNVERIFIED with a minimal failure excerpt. Use after every executor attempt instead of having an expensive model read diffs or test logs.
 tools: Bash, Read, Grep, Glob
 model: haiku
+effort: low
 maxTurns: 20
 ---
 
