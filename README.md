@@ -31,7 +31,7 @@ select  one passer → apply · identical → apply · distinct → Sonnet picke
 | `.claude/agents/cope-executor-large.md` | Opus | Final fallback. Gets only the Opus guideline, never Haiku's goals. |
 | `.claude/agents/cope-picker.md` | Sonnet | Picks the cleanest of several *distinct* passing candidates by reading their diffs. Skips CLAUDE.md. |
 | `.claude/agents/cope-verifier.md` | Haiku | Finds the check commands. Verifies non-git and Stage 3 runs. |
-| `bin/cope-wt` | none (shell) | Snapshot, worktree and usage hooks, brief storage, incremental verification with a `DECISION` line (`--apply` also applies and cleans up), cleanup, and token reports. Uses zero tokens. |
+| `bin/cope-wt` | none (shell) | Snapshot, worktree and usage hooks, brief storage, incremental verification with a `DECISION` line (`--apply` also applies and cleans up), `forbid`/`require` rule checks, cleanup, and token reports. Uses zero tokens. |
 | `.claude/skills/cope/SKILL.md` | none | `/cope <task>` launcher. It runs inline, so your session can resolve what the request points at (the file open in the IDE, a selection, a plan, `@`-mentions, earlier conversation) into `ATTACHMENTS:` and `CONTEXT:`. It then hands off to the `cope` agent, which runs the cascade as a subagent. |
 
 Effort levels are set explicitly in each agent's file, so they don't depend on how the cascade is launched:
@@ -69,6 +69,7 @@ The cascade accepts the first candidate that passes, so it's only as good as its
 - **`tests`:** the normal cascade.
 - **`compile-only` or `none`:** for example, game mods tested in-game, or UI checked by eye. Haiku sampling would just accept the first attempt that builds. These repos get one Sonnet attempt instead, guided by an Opus plan when the task isn't small. The executor is told not to add a test framework, and the report starts with `UNVERIFIED BEHAVIOR` and a manual test checklist.
 - **A failing baseline** stops the run with `BASELINE-FAIL`, unless the task is to fix those failures.
+- **Rules.** The scout turns rules stated in the task, its attachments, or the repo's docs into `cope-wt forbid` and `cope-wt require` checks, such as "never call `ModifyKarma`". `verify` runs them on every candidate next to the build, so a project whose build proves little still has its stated rules checked. `forbid --code` ignores comments and non-source files, so a comment that names a forbidden call doesn't fail it.
 - **Build side effects** found by the profiler, like a post-build copy into a mod-manager profile, are folded into the profile's `Check:` command. Every agent is told to build only with that command.
 
 The profile block is plain Markdown between `<!-- cope:profile -->` markers, so you can edit it. Delete it to force a re-profile. `cope-wt profile` prints its fields.
@@ -137,7 +138,7 @@ What these runs show:
 - **A real bug was fixed:** the Agent tool runs subagents in the background by default, so `cope.md` requires `run_in_background: false`.
 - **Untested:** the `DEPTH-LIMIT` branch, because a `/cope` run still spawned workers with the depth cap at 1.
 
-Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 46-check scripted test against throwaway repos, covering:
+Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 53-check scripted test against throwaway repos, covering:
 - the snapshot of dirty and untracked state, with the main tree and index left untouched,
 - dependency copying,
 - pass counting, oracle tampering, and `DECISION` lines (APPLY, PICK, NONE-PASSED),
@@ -149,7 +150,8 @@ Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway r
 - both Python import cases,
 - the usage hook (dedupe, filtering, always exit 0, waiting for a still-streaming final message without blocking) and the report,
 - brief storage (git-dir location, surviving mid-run cleanup, `--final`) and `verify --apply`,
-- profile parsing, and `.worktreeinclude` merged with the default dependency list.
+- profile parsing, and `.worktreeinclude` merged with the default dependency list,
+- rule checks: `forbid --code` skipping comments, docs, and gitignored files, `require`, and failing loudly on a bad regex or path.
 
 ## License
 

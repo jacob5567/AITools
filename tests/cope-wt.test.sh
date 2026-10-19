@@ -177,6 +177,24 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -f $L2 ]] && break; sleep 0.3; done
 (( took < 500 )) && ok "hook-usage returns immediately (${took}ms)" || bad "hook-usage blocked for ${took}ms"
 tail -1 "$L2" 2>/dev/null | grep -qP '\tcope-interpreter\tsonnet-5-5\t1\t50\t0\t600$' && ok "usage waits for the final message (race)" || { bad "race: $(tail -1 "$L2" 2>/dev/null)"; }
 
+# Rule checks: forbid --code ignores comments and non-source files; require; bad input fails loudly.
+F=$S/rules; mkdir -p "$F/src"; cd "$F"; git init -q
+printf '// never call Danger()\nint a = 1; /* Danger() in a block\n still Danger() */ int b = 2;\nint c = 3; // Danger()\n' > src/ok.cs
+printf '# Danger() mentioned\nx = 1\n' > src/ok.py; printf 'Call Danger() for fun.\n' > src/NOTES.md
+$W forbid --code 'Danger\(' src >/dev/null && ok "forbid --code: comments and docs ignored" || bad "forbid --code false positive: $($W forbid --code 'Danger\(' src)"
+$W forbid 'Danger\(' src >/dev/null && bad "forbid without --code missed text" || ok "forbid without --code checks all text"
+printf 'int d = Danger(); // ok?\n' >> src/ok.cs; printf 'y = Danger()  # call\n' >> src/ok.py
+out=$($W forbid --code 'Danger\(' src); rc=$?
+[[ $rc == 1 ]] && grep -q '^src/ok.cs:5:' <<<"$out" && grep -q '^src/ok.py:3:' <<<"$out" && ! grep -q NOTES <<<"$out" \
+  && ok "forbid --code reports real calls with file:line" || bad "forbid --code: rc=$rc $out"
+echo 'Danger()' > ignored.cs; echo 'ignored.cs' > .gitignore
+$W forbid --code 'Danger\(' ignored.cs >/dev/null && ok "forbid skips gitignored files" || bad "forbid read an ignored file"
+$W require 'never call' src >/dev/null && ok "require finds text" || bad "require miss"
+$W require 'absent text' src >/dev/null && bad "require passed on absent text" || ok "require fails on absent text"
+$W forbid 'x(' src 2>/dev/null; rc1=$?; $W require 'x' nosuch 2>/dev/null; rc2=$?
+[[ $rc1 == 1 && $rc2 == 1 ]] && ok "invalid regex and missing path fail" || bad "bad input rc=$rc1/$rc2"
+cd "$R"
+
 # Run log goes to $COPE_LOG, never the real one, when set.
 L3=$S/runlog.tsv; COPE_LOG=$L3 $W log myrepo code 2 stage1 PASS "haiku,sonnet" "add a thing" >/dev/null
 [[ $(cut -f2- "$L3") == $'myrepo\tcode\t2\tstage1\tPASS\thaiku,sonnet\tadd a thing' && $(cut -f1 "$L3") == "$(date +%F)" ]] && ok "log writes a dated, tab-separated line to COPE_LOG" || { bad "log"; cat "$L3"; }

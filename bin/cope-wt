@@ -12,6 +12,9 @@
 #   cope-wt diffs [--summary] SHA...  candidate diffs vs the snapshot (IDENTICAL / TOO-LARGE shortcuts)
 #   cope-wt apply SHA                 apply a candidate's diff to the main working tree
 #   cope-wt profile                   print the COPE profile block from the repo's CLAUDE.md (or PROFILE: none)
+#   cope-wt forbid [--code] RE PATH...  rule check: fail, listing matches, if the ERE appears under PATH
+#                                     (--code: source files only, comment text ignored)
+#   cope-wt require RE PATH...        rule check: fail unless the ERE appears somewhere under PATH
 #   cope-wt brief save|path           store the scout's brief from stdin (prints its path) / print the path
 #   cope-wt cleanup [--final|--all]   remove this run's worktrees and snapshot (--final: also its brief;
 #                                     --all: every run in this repo)
@@ -279,6 +282,87 @@ cmd_profile() {
     s/^- Baseline: *(.*)$/BASELINE: \1/p'
 }
 
+# Files under the given paths: tracked plus untracked-but-not-ignored in a git tree, everything outside one.
+rule_files() {
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files -co --exclude-standard -z -- "$@"
+  else
+    find "$@" -type f -print0
+  fi
+}
+
+# Line-comment style by file name; "none" means not a known source language.
+comment_mode() {
+  case ${1##*/} in
+    *.c|*.h|*.cc|*.cpp|*.cxx|*.hpp|*.cs|*.java|*.js|*.jsx|*.mjs|*.cjs|*.ts|*.tsx|*.go|*.rs|*.kt|*.kts|*.swift|*.scala|*.dart|*.php|*.css|*.scss|*.less) echo c ;;
+    *.py|*.sh|*.bash|*.zsh|*.rb|*.pl|*.yaml|*.yml|*.toml|*.r|*.R|*.ps1|*.cmake|*.mk|Makefile|Dockerfile) echo hash ;;
+    *.sql|*.lua|*.hs) echo dash ;;
+    *) echo none ;;
+  esac
+}
+
+# Blank out comment text, keeping line numbers. A heuristic: markers inside strings count as comments.
+strip_comments() {
+  awk -v m="$1" '
+    m == "c" {
+      out = ""; s = $0
+      while (s != "") {
+        if (inb) { i = index(s, "*/"); if (!i) break; s = substr(s, i + 2); inb = 0; continue }
+        i = index(s, "/*"); j = index(s, "//")
+        if (j && (!i || j < i)) { out = out substr(s, 1, j - 1); break }
+        if (i) { out = out substr(s, 1, i - 1); s = substr(s, i + 2); inb = 1; continue }
+        out = out s; break
+      }
+      print out; next
+    }
+    m == "hash" { i = index($0, "#");  print (i ? substr($0, 1, i - 1) : $0); next }
+    m == "dash" { i = index($0, "--"); print (i ? substr($0, 1, i - 1) : $0); next }
+    { print }'
+}
+
+rule_args() {
+  local re=$1 p rc=0; shift
+  (($#)) || die "a rule needs REGEX and at least one PATH"
+  grep -qE -- "$re" /dev/null 2>/dev/null || rc=$?
+  ((rc < 2)) || die "invalid regex: $re"
+  for p in "$@"; do [[ -e $p ]] || die "no such path: $p"; done
+}
+
+# Rule check: fail, listing the matches, if REGEX appears under PATH. --code: source files only, comments ignored.
+cmd_forbid() {
+  local code=0 re f m hits=""
+  [[ ${1:-} == --code ]] && { code=1; shift; }
+  re=${1:-}; shift || true
+  rule_args "$re" "$@"
+  while IFS= read -r -d '' f; do
+    [[ -f $f ]] && grep -qIE -- "$re" "$f" || continue
+    if ((code)); then
+      [[ $(comment_mode "$f") != none ]] || continue
+      m=$(strip_comments "$(comment_mode "$f")" <"$f" | grep -nE -- "$re") || true
+    else
+      m=$(grep -nE -- "$re" "$f") || true
+    fi
+    [[ -n $m ]] && hits+=$(sed "s|^|$f:|" <<<"$m")$'\n'
+  done < <(rule_files "$@")
+  if [[ -n $hits ]]; then
+    echo "FORBIDDEN /$re/ found:"
+    head -n 20 <<<"${hits%$'\n'}"
+    return 1
+  fi
+  echo "OK forbid /$re/"
+}
+
+# Rule check: fail unless REGEX appears somewhere under PATH.
+cmd_require() {
+  local re=${1:-} f; shift || true
+  rule_args "$re" "$@"
+  while IFS= read -r -d '' f; do
+    if [[ -f $f ]] && grep -qIE -- "$re" "$f"; then echo "OK require /$re/ ($f)"; return 0; fi
+  done < <(rule_files "$@")
+  echo "MISSING /$re/ under: $*"
+  return 1
+}
+
 cmd_list() {
   local d
   d=$(cache_dir)
@@ -503,5 +587,7 @@ case ${1:-} in
   log) shift; cmd_log "$@" ;;
   brief) shift; cmd_brief "$@" ;;
   profile) shift; cmd_profile "$@" ;;
-  *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  forbid) shift; cmd_forbid "$@" ;;
+  require) shift; cmd_require "$@" ;;
+  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

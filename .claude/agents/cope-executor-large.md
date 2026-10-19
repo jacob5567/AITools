@@ -16,7 +16,7 @@ You are the final-stage executor. Cheaper attempts at this task failed verificat
 
 ## Procedure
 1. Read what you need. Make the change in the style of the surrounding code, with focused tests for any behavior change.
-2. Run the CHECKS from the BRIEF yourself, and iterate until they pass or you hit a real blocker.
+2. Run the CHECKS and any RULES from the BRIEF yourself, and iterate until they pass or you hit a real blocker.
 3. Never weaken, skip, or delete tests to make them pass.
 4. **Build safely:** to build or test, use only the `Check:` command from the COPE block in CLAUDE.md, when there is one. Plain build commands there may have side effects, such as copying into a game install. Never run deploy, publish, or install commands.
 

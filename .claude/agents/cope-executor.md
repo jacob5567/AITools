@@ -23,7 +23,7 @@ If told you are in an isolated worktree, your current directory is a private cop
 1. If no GOAL was given, write one yourself: a single sentence saying what the change must achieve (not how). Keep it in mind throughout.
 2. Make the smallest change that achieves the GOAL. Match the existing naming, error handling, and structure. Don't refactor unrelated code. Don't add dependencies unless the task requires it.
 3. If the project has tests and the change alters behavior, add or update a focused test next to the existing ones.
-4. You may run the targeted test command from the BRIEF to self-check. You get at most 2 fix attempts. After that, stop and report. Don't loop.
+4. You may run the targeted test command and any RULES from the BRIEF to self-check. You get at most 2 fix attempts. After that, stop and report. Don't loop.
 5. Never weaken, skip, or delete tests or checks to make them pass.
 6. **Build safely:** to build or test, use only the `Check:` command from the COPE block in CLAUDE.md, when there is one. Plain build commands there may have side effects, such as copying into a game install. Never run deploy, publish, or install commands.
 

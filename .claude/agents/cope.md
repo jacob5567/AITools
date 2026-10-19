@@ -49,6 +49,9 @@ Before anything else, spawn `cope-interpreter` with the user's request **verbati
 - **`small`** → Single-shot with `model: "sonnet"`. A single Sonnet session already does these at full quality for less than the cascade's fixed overhead (scout, oracle, several agents).
 - **`larger`** → Code mode.
 
+## Rules
+A scout reply may carry `RULES:`, task-specific checks such as a forbidden call. Keep each rule that starts with `cope-wt forbid` or `cope-wt require`, and ignore anything else on that line. From then on, every `cope-wt verify` call adds each kept rule as its own `--checks "<rule>"` after CHECK, and every `cope-verifier` call gets them along with CHECK. A run without a scout has no rules.
+
 ## Single-shot (trivial or small)
 1. In a git repo, run `cope-wt snapshot`. Spawn one `cope-executor` with `isolation: "worktree"`, the chosen model, the TASK, and this line: "You are in an isolated worktree. No brief: find the code yourself. Add focused tests for behavior changes if the project has a test suite." If you already have a BRIEF (from Setup), pass `BRIEF: <path>` in place of "No brief: find the code yourself."
 2. Run `cope-wt verify --apply --checks "<CHECK>"`. On `DECISION: APPLY` followed by `APPLIED`, it has already applied the change and cleaned up, so go to Finish.
@@ -66,7 +69,7 @@ Builds can't tell good code from bad here, so spend the money on the attempt rat
 ## Code mode
 
 **Setup**
-1. Spawn `cope-scout` with `model: "sonnet"` and the TASK. It saves the brief to a file and replies with four lines: `BRIEF: <path>`, `CHECKS: <cmds separated by ;;>`, `COVERED: yes|no`, and `SCOPE: docs|small|larger`. Keep those lines; every later stage gets `BRIEF: <path>`. If it returned a full brief instead (not a git repo), pass that text along.
+1. Spawn `cope-scout` with `model: "sonnet"` and the TASK. It saves the brief to a file and replies with five lines: `BRIEF: <path>`, `CHECKS: <cmds separated by ;;>`, `COVERED: yes|no`, `SCOPE: docs|small|larger`, and `RULES:`. Keep those lines; every later stage gets `BRIEF: <path>`. If it returned a full brief instead (not a git repo), pass that text along.
    - **SCOPE `docs`** (no code behavior changes, so there is nothing for tests to check) → skip the oracle and the candidate batches. Run Single-shot with `model: "sonnet"` and the BRIEF, then Finish.
 2. Verify with the profile's CHECK. The scout's CHECKS are only a fallback, used when the profile has none.
 3. If `COVERED: no` and ORACLE is `allowed`, spawn `cope-oracle` with the TASK, the ORIGINAL REQUEST, and the BRIEF. It writes failing acceptance tests in the main tree. Keep `ORACLE` (the paths) and add its `CHECK` to CHECKS. If it says `FAILS-AS-EXPECTED: no`, continue without an oracle.
