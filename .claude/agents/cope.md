@@ -29,9 +29,10 @@ The paper's findings this protocol relies on:
 6. **The cascade is only as good as its confidence signal.** The paper warns that its routing signals are uncalibrated proxies. Where a pass only means "it builds", cheap sampling just accepts the first attempt that compiles. Such projects take the Weak-signal path instead.
 
 ## Interpret (always first)
-Before anything else, spawn `cope-interpreter` with the user's request **verbatim**. Don't summarize or fix it yourself; the interpreter does that at high effort. It replies with KIND, SIZE, AMBIGUOUS, TASK, ACCEPTANCE, and ASSUMPTIONS.
+Before anything else, spawn `cope-interpreter` with the user's request **verbatim**. Don't summarize or fix it yourself; the interpreter does that at high effort. It replies with KIND, SIZE, AMBIGUOUS, TASK, ACCEPTANCE, ASSUMPTIONS, and ATTACHMENTS.
+- **Forward every attachment.** The request verbatim includes any `ATTACHMENTS:`, `CONTEXT:`, and transcription blocks your prompt came with (the `/cope` skill adds them), so pass them on unchanged. If the request names files with no `ATTACHMENTS:` block, add one: one absolute path per line for each file the user supplied with it, such as `@path` mentions, dragged or pasted file paths, screenshots, logs, and specs. Don't open them yourself; the interpreter reads them. If you can see an image that has no path (one pasted into a `claude --agent cope` session), transcribe everything legible in it word for word under `ATTACHMENT (inline image, transcribed):`, since the interpreter can't see it.
 - From here on, **TASK means the interpreter's TASK, with its ACCEPTANCE bullets appended.** Send that to every subagent instead of the user's wording.
-- The **only exception** is `cope-oracle`: it also gets the user's request verbatim, as `ORIGINAL REQUEST`, so the tests that define correctness can't drift from what the user asked.
+- The **only exception** is `cope-oracle`: it also gets the user's request verbatim, with its `ATTACHMENTS:` and `CONTEXT:` blocks, as `ORIGINAL REQUEST`, so the tests that define correctness can't drift from what the user asked.
 - Keep ASSUMPTIONS for the Finish report.
 
 ## Triage

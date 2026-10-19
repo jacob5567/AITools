@@ -22,7 +22,7 @@ select  one passer → apply · identical → apply · distinct → Sonnet picke
 | File | Model | Job |
 |---|---|---|
 | `.claude/agents/cope.md` | Sonnet | Orchestrator. It has only `Bash` and an `Agent` tool limited to the cope agents, so it can't read code. It skips CLAUDE.md, passes the brief by path, and chains its shell steps. |
-| `.claude/agents/cope-interpreter.md` | Sonnet (high effort) | Runs first on every request. It rewrites the request into a clear task with acceptance criteria and assumptions, keeping exact names and strings word for word. It classifies the request, so triage happens at high effort, not in the low-effort orchestrator. |
+| `.claude/agents/cope-interpreter.md` | Sonnet (high effort) | Runs first on every request. It reads any attached files (screenshots, logs, specs, PDFs), then rewrites the request into a clear task with acceptance criteria and assumptions, keeping exact names and strings word for word. It classifies the request, so triage happens at high effort, not in the low-effort orchestrator. |
 | `.claude/agents/cope-profiler.md` | Sonnet | Runs once per repo. It finds the safe check command, what a pass proves (`tests` / `compile-only` / `none`), build side effects, the gitignored files builds need, and today's baseline. It writes them to a marked block in CLAUDE.md and adds `.worktreeinclude` entries. |
 | `.claude/agents/cope-scout.md` | Sonnet (briefs) / Haiku (voting) | Saves a compact brief (files, conventions, check commands) with `cope-wt brief save`, and replies with only its path, the checks, and whether existing tests cover the target. In question mode, Haiku scouts vote. |
 | `.claude/agents/cope-oracle.md` | Sonnet | Writes the shared acceptance tests that define a pass, before any code exists. |
@@ -32,7 +32,7 @@ select  one passer → apply · identical → apply · distinct → Sonnet picke
 | `.claude/agents/cope-picker.md` | Sonnet | Picks the cleanest of several *distinct* passing candidates by reading their diffs. Skips CLAUDE.md. |
 | `.claude/agents/cope-verifier.md` | Haiku | Finds the check commands. Verifies non-git and Stage 3 runs. |
 | `bin/cope-wt` | none (shell) | Snapshot, worktree and usage hooks, brief storage, incremental verification with a `DECISION` line (`--apply` also applies and cleans up), cleanup, and token reports. Uses zero tokens. |
-| `.claude/skills/cope/SKILL.md` | none | `/cope <task>` launcher. It has `context: fork` and `agent: cope`, so the cascade runs as a subagent. |
+| `.claude/skills/cope/SKILL.md` | none | `/cope <task>` launcher. It runs inline, so your session can resolve what the request points at (the file open in the IDE, a selection, a plan, `@`-mentions, earlier conversation) into `ATTACHMENTS:` and `CONTEXT:`. It then hands off to the `cope` agent, which runs the cascade as a subagent. |
 
 Effort levels are set explicitly in each agent's file, so they don't depend on how the cascade is launched:
 - **low:** the orchestrator and the verifier, which do routing and mechanical checks.
@@ -135,7 +135,7 @@ What these runs show:
   - a forced Stage 2 (Opus guideline → Sonnet candidates, about $0.30),
   - two concurrent `/cope` sessions, both resolved by session (`hook.log`).
 - **A real bug was fixed:** the Agent tool runs subagents in the background by default, so `cope.md` requires `run_in_background: false`.
-- **Untested:** the `DEPTH-LIMIT` branch, because a forked `/cope` still spawned workers with the depth cap at 1.
+- **Untested:** the `DEPTH-LIMIT` branch, because a `/cope` run still spawned workers with the depth cap at 1.
 
 Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 46-check scripted test against throwaway repos, covering:
 - the snapshot of dirty and untracked state, with the main tree and index left untouched,
