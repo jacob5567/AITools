@@ -60,7 +60,9 @@ snap_ref() { echo "refs/cope/$RUN/snapshot"; }
 tree_commit() {
   local dir=$1 parent=${2:-} idx tree
   idx=$(mktemp)
-  cp "$(git -C "$dir" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || rm -f "$idx"
+  # -p keeps the index's mtime, so git still re-reads files edited in the same second as the checkout
+  # ("racily clean"); a fresh mtime makes it trust their stat data and miss same-size edits.
+  cp -p "$(git -C "$dir" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || rm -f "$idx"
   GIT_INDEX_FILE=$idx git -C "$dir" add -A -- . "${JUNK[@]}"
   tree=$(GIT_INDEX_FILE=$idx git -C "$dir" write-tree)
   rm -f "$idx"

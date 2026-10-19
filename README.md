@@ -138,8 +138,9 @@ What these runs show:
 - **A real bug was fixed:** the Agent tool runs subagents in the background by default, so `cope.md` requires `run_in_background: false`.
 - **Untested:** the `DEPTH-LIMIT` branch, because a `/cope` run still spawned workers with the depth cap at 1.
 
-Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 53-check scripted test against throwaway repos, covering:
+Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway repos in a temp dir and exits non-zero on failure. `bin/cope-wt` has a 54-check scripted test against throwaway repos, covering:
 - the snapshot of dirty and untracked state, with the main tree and index left untouched,
+- a same-size edit made in the same second as the worktree checkout, which `verify` must still see,
 - dependency copying,
 - pass counting, oracle tampering, and `DECISION` lines (APPLY, PICK, NONE-PASSED),
 - incremental batches,

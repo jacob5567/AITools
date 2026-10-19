@@ -177,6 +177,15 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -f $L2 ]] && break; sleep 0.3; done
 (( took < 500 )) && ok "hook-usage returns immediately (${took}ms)" || bad "hook-usage blocked for ${took}ms"
 tail -1 "$L2" 2>/dev/null | grep -qP '\tcope-interpreter\tsonnet-5-5\t1\t50\t0\t600$' && ok "usage waits for the final message (race)" || { bad "race: $(tail -1 "$L2" 2>/dev/null)"; }
 
+# Racy edit: worktree checkout and a same-size edit in one second, verified a second later, must not be NO-CHANGE.
+cd "$R"; git checkout -q calc.py; $W snapshot >/dev/null
+while (( 10#$(date +%N) > 200000000 )); do :; done
+echo "{\"name\":\"racy\",\"cwd\":\"$R\"}" | $W hook-create >/dev/null 2>&1
+printf 'def add(a, b):\n    return a + b\n' > "$($W list)/calc.py"; sleep 1.1   # in place: same inode and size
+out=$($W verify --checks 'python3 test_oracle.py')
+grep -q '^PASS ' <<<"$out" && ok "same-second edit is seen by verify" || { bad "racy edit"; echo "$out"; }
+$W cleanup >/dev/null
+
 # Rule checks: forbid --code ignores comments and non-source files; require; bad input fails loudly.
 F=$S/rules; mkdir -p "$F/src"; cd "$F"; git init -q
 printf '// never call Danger()\nint a = 1; /* Danger() in a block\n still Danger() */ int b = 2;\nint c = 3; // Danger()\n' > src/ok.cs
