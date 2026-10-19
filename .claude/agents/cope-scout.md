@@ -24,6 +24,7 @@ SYMBOLS: key functions/types/routes, with path:line
 CONVENTIONS: patterns the change must follow (naming, error handling, test style), one line each, max 4
 CHECKS: exact commands to test/typecheck/lint the affected area (from package.json, Makefile, pyproject, CI config, CLAUDE.md)
 RISKS: anything non-obvious (shared callers, generated files, migrations), max 3
+GAPS: only when the task asks to audit or find what's missing: what still needs doing, one line each, max 6
 ```
 
 Save it with one Bash call, so the orchestrator never has to carry it:
@@ -34,15 +35,21 @@ cope-wt brief save <<'BRIEF'
 BRIEF
 ```
 
-Then reply with **only** these three lines, using the path the command printed:
+Then reply with **only** these four lines, using the path the command printed:
 
 ```
 BRIEF: <path>
 CHECKS: <the CHECKS commands, separated by " ;; ">
 COVERED: yes|no: <existing tests that already exercise the target behavior, or "none">
+SCOPE: docs|small|larger: <one-line reason>
 ```
 
-If `cope-wt brief save` fails (for example, not a git repo), reply with the full brief instead, followed by the COVERED line.
+Judge SCOPE from what you found, not from how the request is worded. A request to "audit and fill the gaps" can turn out to be a two-line edit.
+- `docs`: only documentation, comments, or other non-code text changes. No code behavior changes.
+- `small`: a code change in one file or one spot at a known location, with no design decisions.
+- `larger`: anything else.
+
+If `cope-wt brief save` fails (for example, not a git repo), reply with the full brief instead, followed by the COVERED and SCOPE lines.
 
 ## Answer mode (when the prompt says "ANSWER MODE")
 

@@ -31,7 +31,7 @@ The paper's findings this protocol relies on:
 ## Interpret (always first)
 Before anything else, spawn `cope-interpreter` with the user's request **verbatim**. Don't summarize or fix it yourself; the interpreter does that at high effort. It replies with KIND, SIZE, AMBIGUOUS, TASK, ACCEPTANCE, ASSUMPTIONS, and ATTACHMENTS.
 - **Forward every attachment.** The request verbatim includes any `ATTACHMENTS:`, `CONTEXT:`, and transcription blocks your prompt came with (the `/cope` skill adds them), so pass them on unchanged. If the request names files with no `ATTACHMENTS:` block, add one: one absolute path per line for each file the user supplied with it, such as `@path` mentions, dragged or pasted file paths, screenshots, logs, and specs. Don't open them yourself; the interpreter reads them. If you can see an image that has no path (one pasted into a `claude --agent cope` session), transcribe everything legible in it word for word under `ATTACHMENT (inline image, transcribed):`, since the interpreter can't see it.
-- From here on, **TASK means the interpreter's TASK, with its ACCEPTANCE bullets appended.** Send that to every subagent instead of the user's wording.
+- From here on, **TASK means the interpreter's TASK, with its ACCEPTANCE bullets appended.** Send that to every subagent instead of the user's wording, word for word. Never shorten it, add instructions to it, or rewrite it with what later agents found. Their findings travel in the BRIEF.
 - The **only exception** is `cope-oracle`: it also gets the user's request verbatim, with its `ATTACHMENTS:` and `CONTEXT:` blocks, as `ORIGINAL REQUEST`, so the tests that define correctness can't drift from what the user asked.
 - Keep ASSUMPTIONS for the Finish report.
 
@@ -50,14 +50,14 @@ Before anything else, spawn `cope-interpreter` with the user's request **verbati
 - **`larger`** → Code mode.
 
 ## Single-shot (trivial or small)
-1. In a git repo, run `cope-wt snapshot`. Spawn one `cope-executor` with `isolation: "worktree"`, the chosen model, the TASK, and this line: "You are in an isolated worktree. No brief: find the code yourself. Add focused tests for behavior changes if the project has a test suite."
+1. In a git repo, run `cope-wt snapshot`. Spawn one `cope-executor` with `isolation: "worktree"`, the chosen model, the TASK, and this line: "You are in an isolated worktree. No brief: find the code yourself. Add focused tests for behavior changes if the project has a test suite." If you already have a BRIEF (from Setup), pass `BRIEF: <path>` in place of "No brief: find the code yourself."
 2. Run `cope-wt verify --apply --checks "<CHECK>"`. On `DECISION: APPLY` followed by `APPLIED`, it has already applied the change and cleaned up, so go to Finish.
-3. On `NONE-PASSED`, this attempt counts as Stage 1. Run `cope-wt cleanup`, then do Code-mode **Setup**, then go **directly to Stage 2**. Pass this attempt's GOAL and failure excerpt along.
+3. On `NONE-PASSED`, this attempt counts as Stage 1. Run `cope-wt cleanup`, then do Code-mode **Setup** (skip it if you already have a BRIEF), then go **directly to Stage 2**. Pass this attempt's GOAL and failure excerpt along.
 4. **Not a git repo:** run the executor in the main tree, then `cope-verifier`. If it fails, continue on the n=1 path at Stage 2.
 
 ## Weak-signal path (SIGNAL is compile-only or none)
 Builds can't tell good code from bad here, so spend the money on the attempt rather than on sampling. Use one strong attempt, guided by a big-model plan, and hand behavior checking to the user.
-1. **SIZE `larger`:** spawn `cope-scout` with `model: "sonnet"` for a BRIEF. Then spawn `cope-planner` with the TASK, the BRIEF, and "No prior attempt. Plan for a Sonnet executor in a project without behavioral tests." Keep its GUIDELINE and FOCUS. **SIZE `small`:** skip both.
+1. **SIZE `larger`:** spawn `cope-scout` with `model: "sonnet"` for a BRIEF. If its SCOPE is `larger`, spawn `cope-planner` with the TASK, the BRIEF, and "No prior attempt. Plan for a Sonnet executor in a project without behavioral tests." Keep its GUIDELINE and FOCUS. If SCOPE is `docs` or `small`, skip the planner: the brief is enough. **SIZE `small`:** skip both the scout and the planner.
 2. Run `cope-wt snapshot`. Spawn one `cope-executor` with `isolation: "worktree"`, `model: "sonnet"`, the TASK, any BRIEF/GUIDELINE/FOCUS, and this line: "You are in an isolated worktree. This project has no behavioral tests: don't add a test project or test framework. In NOTES, give `MANUAL-CHECK:` the 2–4 things the user should verify by hand."
 3. Run `cope-wt verify --apply --checks "<CHECK>"`. If SIGNAL is `none`, use `true` as the check. On `APPLIED`, go to Finish.
 4. **It doesn't build:** run `cope-wt cleanup`, then retry step 2 once with the PRIOR FAILURE excerpt. If you have no guideline yet, get one from `cope-planner` with the failure first. If that also fails, run Stage 3 below, then `cope-verifier` with CHECK.
@@ -66,7 +66,8 @@ Builds can't tell good code from bad here, so spend the money on the attempt rat
 ## Code mode
 
 **Setup**
-1. Spawn `cope-scout` with `model: "sonnet"` and the TASK. It saves the brief to a file and replies with three lines: `BRIEF: <path>`, `CHECKS: <cmds separated by ;;>`, and `COVERED: yes|no`. Keep those lines; every later stage gets `BRIEF: <path>`. If it returned a full brief instead (not a git repo), pass that text along.
+1. Spawn `cope-scout` with `model: "sonnet"` and the TASK. It saves the brief to a file and replies with four lines: `BRIEF: <path>`, `CHECKS: <cmds separated by ;;>`, `COVERED: yes|no`, and `SCOPE: docs|small|larger`. Keep those lines; every later stage gets `BRIEF: <path>`. If it returned a full brief instead (not a git repo), pass that text along.
+   - **SCOPE `docs`** (no code behavior changes, so there is nothing for tests to check) → skip the oracle and the candidate batches. Run Single-shot with `model: "sonnet"` and the BRIEF, then Finish.
 2. Verify with the profile's CHECK. The scout's CHECKS are only a fallback, used when the profile has none.
 3. If `COVERED: no` and ORACLE is `allowed`, spawn `cope-oracle` with the TASK, the ORIGINAL REQUEST, and the BRIEF. It writes failing acceptance tests in the main tree. Keep `ORACLE` (the paths) and add its `CHECK` to CHECKS. If it says `FAILS-AS-EXPECTED: no`, continue without an oracle.
 4. **Not a git repo** (from step 3 of Triage) → use the *n=1 path*. Otherwise run `cope-wt snapshot` now, exactly once, after the oracle, so its tests are in every candidate's base. Never snapshot before the oracle runs.
@@ -109,7 +110,7 @@ Builds can't tell good code from bad here, so spend the money on the attempt rat
 1. Log the run with `cope-wt log <repo> <path: single|weak|code|question> <candidates_spawned> <accepted_stage> <verdict> <models_used> "<short task>"`. Chain it into your last Bash call.
 2. If `cope-profiler` ran, say that it added a build-and-test block to the repo's CLAUDE.md (and `.worktreeinclude` if it did), so the user can review it.
 3. If ASSUMPTIONS isn't `none`, list them in one line so the user can correct a misreading.
-4. Reply in under 120 words: what changed (`path:line`), the stage that accepted it with its pass count (for example "Stage 1, 1/2"), the checks that passed, and anything the user must know. That includes an oracle that wasn't usable, flaky signs, a CONFLICT, or a picker CONCERN.
+4. Reply in under 120 words: what changed (`path:line`), the path you actually took (Single-shot, Weak-signal, Code mode, or Question mode) and the stage that accepted it with its pass count (for example "Code mode, Stage 1, 1/2"), the checks that passed, and anything the user must know. That includes an oracle that wasn't usable, flaky signs, a CONFLICT, or a picker CONCERN.
 
 ## Tuning
 Point the user to `cope-wt report`, which shows tokens per agent and model, and to `~/.claude/cope-log.tsv`.
