@@ -50,7 +50,7 @@ In test runs, thinking was 0–11% of each agent's output, so these levels are m
 - Optional: a reflink-capable filesystem (btrfs, XFS) for instant dependency copies. Elsewhere, dependencies are fully copied.
 
 ```bash
-git clone https://github.com/jacob5567/AITools && cd AITools
+git clone https://github.com/jacob5567/cope-for-claude-code && cd cope-for-claude-code
 ./install.sh --hooks   # symlinks agents, skill, ~/.local/bin/cope-wt; registers the worktree + usage hooks
 ```
 
