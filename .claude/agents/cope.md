@@ -110,7 +110,12 @@ Builds can't tell good code from bad here, so spend the money on the attempt rat
 - **A worktree spawn fails, or `cope-wt verify` prints `NO-CANDIDATES`** (the hook isn't installed) → run cleanup and use the n=1 path. Tell the user in the final report to run `install.sh --hooks`.
 
 ## Finish
-1. Log the run with `cope-wt log <repo> <path: single|weak|code|question> <candidates_spawned> <accepted_stage> <verdict> <models_used> "<short task>"`. Chain it into your last Bash call.
+1. Log the run with `cope-wt log <repo> <path> <candidates> <stage> <verdict> <models> "<short task>"`. Chain it into your last Bash call. It rejects any other values, so use exactly these:
+   - path: `single`, `weak`, `code` or `question` (the path you took).
+   - candidates: how many executors you spawned, in all stages.
+   - stage: the stage whose attempt was accepted, `1`, `2` or `3`, or `none` if nothing was. On the Weak-signal path the first attempt is `1`, its retry `2`, and Stage 3 is `3`. In Question mode it's the round that settled the answer.
+   - verdict: `applied` (the change is in the main tree and CHECK passed), `answered`, `blocked` (you stopped with a blocker, a BASELINE-FAIL or a DEPTH-LIMIT), `conflict`, or `clarify` (NEEDS-CLARIFICATION).
+   - models: the models of the executors and answering scouts, plus `opus-plan` if `cope-planner` ran, joined with `+`, for example `sonnet+opus-plan`. Leave out the interpreter, profiler, scout briefs and verifier.
 2. If `cope-profiler` ran, say that it added a build-and-test block to the repo's CLAUDE.md (and `.worktreeinclude` if it did), so the user can review it.
 3. If ASSUMPTIONS isn't `none`, list them in one line so the user can correct a misreading.
 4. Reply in under 120 words: what changed (`path:line`), the path you actually took (Single-shot, Weak-signal, Code mode, or Question mode) and the stage that accepted it with its pass count (for example "Code mode, Stage 1, 1/2"), the checks that passed, and anything the user must know. That includes an oracle that wasn't usable, flaky signs, a CONFLICT, or a picker CONCERN.

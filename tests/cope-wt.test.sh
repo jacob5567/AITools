@@ -161,9 +161,33 @@ out=$(echo '{"agent_type":"cope-executor","agent_transcript_path":"'"$T"'","sess
 echo '{"agent_type":"Explore","agent_transcript_path":"'"$T"'"}' | $W hook-usage
 echo 'not json' | $W hook-usage; rc2=$?
 [[ $rc == 0 && $rc2 == 0 && -z $out ]] && ok "hook-usage silent, always exit 0" || bad "hook-usage rc=$rc/$rc2 out=$out"
-[[ $(tail -n +2 "$COPE_USAGE_LOG" | wc -l) == 1 ]] && tail -1 "$COPE_USAGE_LOG" | grep -qP '\tcope-executor\thaiku-5-5\t7\t110\t900\t47$' \
+[[ $(tail -n +2 "$COPE_USAGE_LOG" | wc -l) == 1 ]] && tail -1 "$COPE_USAGE_LOG" | grep -qP '\tcope-executor\thaiku-5-5\t7\t110\t900\t47\t0\t1$' \
   && ok "usage: deduped by message id, non-cope agents skipped" || { bad "usage row"; cat "$COPE_USAGE_LOG"; }
-$W report | grep -q 'TOTAL .*haiku-5-5 .*out=     47' && ok "report totals" || { bad report; $W report; }
+$W report | grep -q 'TOTAL .*haiku-5-5 .*out=     47$' && ok "report totals" || { bad report; $W report; }
+
+# A second stop of the same agent (it resumed) logs only what's new, so the rows still add up to one spawn.
+echo '{"type":"assistant","message":{"id":"m3","model":"claude-haiku-5-5","stop_reason":"end_turn","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000,"output_tokens":5}}}' >> "$T"
+echo '{"agent_type":"cope-executor","agent_transcript_path":"'"$T"'","session_id":"abcdef123","cwd":"/x/myrepo"}' | $W hook-usage
+echo '{"agent_type":"cope-executor","agent_transcript_path":"'"$T"'","session_id":"abcdef123","cwd":"/x/myrepo"}' | $W hook-usage
+[[ $(tail -n +2 "$COPE_USAGE_LOG" | wc -l) == 2 ]] && tail -1 "$COPE_USAGE_LOG" | grep -qP '\thaiku-5-5\t1\t0\t1000\t5\t0\t0$' \
+  && $W report | grep -q 'cope-executor .*x1 .*cache_read=     1900 out=     52$' \
+  && ok "usage: a repeat stop logs only the change; report counts one spawn" || { bad "repeat stop"; cat "$COPE_USAGE_LOG"; $W report; }
+
+# No final usage recorded (only start-of-stream counts): output is estimated from the visible content and marked.
+T4=$S/est.jsonl; L4=$S/est.tsv; big=$(printf 'x%.0s' $(seq 2100))
+cat > "$T4" <<EOF
+{"type":"assistant","message":{"id":"e1","model":"claude-sonnet-5-5","usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":500,"output_tokens":8},"content":[{"type":"thinking","thinking":"","signature":"abc"}]}}
+{"type":"assistant","message":{"id":"e1","model":"claude-sonnet-5-5","usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":500,"output_tokens":8},"content":[{"type":"text","text":"$big"}]}}
+{"type":"assistant","message":{"id":"e2","model":"claude-sonnet-5-5","stop_reason":"end_turn","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":600,"output_tokens":30},"content":[{"type":"text","text":"$big"}]}}
+EOF
+echo '{"agent_type":"cope-executor","agent_transcript_path":"'"$T4"'","session_id":"est12345","cwd":"/x/r"}' | COPE_USAGE_LOG=$L4 COPE_USAGE_WAIT=0 $W hook-usage
+tail -1 "$L4" | grep -qP '\tsonnet-5-5\t4\t0\t1100\t1030\t1\t1$' && COPE_USAGE_LOG=$L4 $W report | grep -q 'TOTAL .*out=   1030~$' \
+  && ok "usage: estimates output without a final usage, keeps an exact final one, marks the estimate" \
+  || { bad "estimate"; cat "$L4"; COPE_USAGE_LOG=$L4 $W report; }
+
+# A log from before the output_est and agents columns still reports, with old rows counted as one spawn each.
+L5=$S/old.tsv; printf 'time\tsession\trepo\tagent\tmodel\tinput\tcache_write\tcache_read\toutput\n2026-01-01T00:00:00\told1\tr\tcope\tsonnet-5-5\t1\t2\t3\t4\n' > "$L5"
+COPE_USAGE_LOG=$L5 $W report | grep -q 'cope .*x1 .*out=      4$' && ok "report reads an old-format log" || { bad "old log"; COPE_USAGE_LOG=$L5 $W report; }
 
 # Race: the hook fires while the last message is still streaming; the detached parser must wait for it.
 unset COPE_USAGE_SYNC; T2=$S/race.jsonl; L2=$S/race.tsv
@@ -175,7 +199,7 @@ sleep 1
 echo '{"type":"assistant","message":{"id":"r1","model":"claude-sonnet-5-5","stop_reason":"end_turn","usage":{"input_tokens":1,"cache_creation_input_tokens":50,"cache_read_input_tokens":0,"output_tokens":600}}}' >> "$T2"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -f $L2 ]] && break; sleep 0.3; done
 (( took < 500 )) && ok "hook-usage returns immediately (${took}ms)" || bad "hook-usage blocked for ${took}ms"
-tail -1 "$L2" 2>/dev/null | grep -qP '\tcope-interpreter\tsonnet-5-5\t1\t50\t0\t600$' && ok "usage waits for the final message (race)" || { bad "race: $(tail -1 "$L2" 2>/dev/null)"; }
+tail -1 "$L2" 2>/dev/null | grep -qP '\tcope-interpreter\tsonnet-5-5\t1\t50\t0\t600\t0\t1$' && ok "usage waits for the final message (race)" || { bad "race: $(tail -1 "$L2" 2>/dev/null)"; }
 
 # Racy edit: worktree checkout and a same-size edit in one second, verified a second later, must not be NO-CHANGE.
 cd "$R"; git checkout -q calc.py; $W snapshot >/dev/null
@@ -205,7 +229,14 @@ $W forbid 'x(' src 2>/dev/null; rc1=$?; $W require 'x' nosuch 2>/dev/null; rc2=$
 cd "$R"
 
 # Run log goes to $COPE_LOG, never the real one, when set.
-L3=$S/runlog.tsv; COPE_LOG=$L3 $W log myrepo code 2 stage1 PASS "haiku,sonnet" "add a thing" >/dev/null
-[[ $(cut -f2- "$L3") == $'myrepo\tcode\t2\tstage1\tPASS\thaiku,sonnet\tadd a thing' && $(cut -f1 "$L3") == "$(date +%F)" ]] && ok "log writes a dated, tab-separated line to COPE_LOG" || { bad "log"; cat "$L3"; }
+L3=$S/runlog.tsv; COPE_LOG=$L3 $W log myrepo code 2 1 applied "opus-plan,Sonnet,haiku" "add a thing" >/dev/null
+[[ $(cut -f2- "$L3") == $'myrepo\tcode\t2\t1\tapplied\thaiku+sonnet+opus-plan\tadd a thing' && $(cut -f1 "$L3") == "$(date +%F)" ]] \
+  && ok "log writes a dated, tab-separated line to COPE_LOG, models in a fixed order" || { bad "log"; cat "$L3"; }
+for args in "r weak 1 weak-1 applied sonnet t" "r weak 1 1 built-unverified sonnet t" "r weak 1 1 applied sonnet,haiku-none t" \
+            "r stage 1 1 applied sonnet t" "r weak one 1 applied sonnet t" "r weak 1 1 applied sonnet"; do
+  # shellcheck disable=SC2086
+  COPE_LOG=$L3 $W log $args >/dev/null 2>&1 && bad "log accepted: $args"
+done
+[[ $(wc -l < "$L3") == 1 ]] && ok "log rejects bad fields and writes nothing" || { bad "log wrote bad lines"; cat "$L3"; }
 
 echo; ((FAILS)) && { echo "$FAILS failure(s)"; exit 1; } || echo "all passed"

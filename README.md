@@ -61,7 +61,7 @@ There are three ways to run it:
 
 Two logs help with tuning:
 - **`~/.claude/cope-log.tsv`** gets one line per run, written by the orchestrator: the path taken, candidates spawned, the accepting stage, and the models used.
-- **`~/.claude/cope-usage.tsv`** gets one line per cope agent and model, written by the `SubagentStop` hook: input, cache-write, cache-read, and output tokens. To see the totals, run `cope-wt report [N]`, which summarizes the last N runs per agent and model.
+- **`~/.claude/cope-usage.tsv`** gets a line per cope agent and model, written by the `SubagentStop` hook: input, cache-write, cache-read, and output tokens. An agent that stops more than once gets a line for each stop, holding only what's new since the last one, so the lines add up. Claude Code often records only a message's start-of-stream usage, so for those messages the output is estimated from the transcript's visible text. Hidden thinking can't be counted, so `output_est` counts the estimated messages and `cope-wt report [N]` marks those totals with `~` as lower bounds. The report summarizes the last N runs per agent and model.
 
 ## Projects without tests
 
@@ -95,7 +95,7 @@ Knobs (environment variables):
 - `COPE_MAX_DIFF_LINES`: above this, the picker is skipped and the smallest diff wins. Default 1500.
 - `COPE_SNAPSHOT_MAX_AGE`: default 43200 seconds.
 - `COPE_USAGE_LOG`: default `~/.claude/cope-usage.tsv`.
-- `COPE_LOG`: the per-run log that `cope-wt log` writes, default `~/.claude/cope-log.tsv`.
+- `COPE_LOG`: the per-run log that `cope-wt log` writes, default `~/.claude/cope-log.tsv`. `cope-wt log` checks its fields (run it without arguments to see them) and writes nothing if one is wrong.
 - `COPE_RUN`: overrides the run key.
 
 ## How this follows the paper
@@ -149,7 +149,7 @@ Run the `cope-wt` test suite with `tests/cope-wt.test.sh`. It builds throwaway r
 - per-run isolation and its fallbacks, and `cleanup --all`,
 - the plain-worktree fallback and hook-remove,
 - both Python import cases,
-- the usage hook (dedupe, filtering, always exit 0, waiting for a still-streaming final message without blocking) and the report,
+- the usage hook (dedupe, filtering, always exit 0, waiting for a still-streaming final message without blocking, estimating output when no final usage was recorded, logging only the change on a repeat stop) and the report,
 - brief storage (git-dir location, surviving mid-run cleanup, `--final`) and `verify --apply`,
 - profile parsing, and `.worktreeinclude` merged with the default dependency list,
 - rule checks: `forbid --code` skipping comments, docs, and gitignored files, `require`, and failing loudly on a bad regex or path.

@@ -18,7 +18,8 @@
 #   cope-wt brief save|path           store the scout's brief from stdin (prints its path) / print the path
 #   cope-wt cleanup [--final|--all]   remove this run's worktrees and snapshot (--final: also its brief;
 #                                     --all: every run in this repo)
-#   cope-wt log FIELD...              append a run line (date + tab-separated fields) to $COPE_LOG (~/.claude/cope-log.tsv)
+#   cope-wt log REPO PATH CANDIDATES STAGE VERDICT MODELS TASK
+#                                     check the fields, then append a dated run line to $COPE_LOG (~/.claude/cope-log.tsv)
 #   cope-wt report [N]                token usage per agent and model for the last N runs (default 5)
 #
 # Runs are keyed by the Claude Code session (CLAUDE_CODE_SESSION_ID, or COPE_RUN), so concurrent
@@ -182,44 +183,97 @@ cmd_hook_usage() {
   [[ -n $cwd ]] && repo=$(cd "$cwd" 2>/dev/null && basename "$(main_root)" 2>/dev/null) || repo=$(basename "${cwd:-?}")
   local script
   script=$(cat <<'PY'
-import json, sys, os, time
+import json, sys, os, time, fcntl, hashlib
 ev = json.loads(sys.stdin.read())
 agent = ev.get("agent_type") or ""
 path = ev.get("agent_transcript_path") or ""
 if not agent.startswith("cope") or not os.path.isfile(path):
     sys.exit(0)
+KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+# Visible output characters per output token, measured on this machine's transcripts.
+CHARS_PER_TOKEN = 2.1
 def read():
-    last, final = {}, False
+    # Each content block of a message is its own transcript entry. Most carry the usage from the start of the
+    # stream: the input and cache counts are final, but output_tokens is a few tokens. Only some messages get an
+    # entry with a stop_reason and the final usage.
+    msgs, final = {}, False
     for line in open(path, encoding="utf-8", errors="replace"):
         try:
             e = json.loads(line)
         except ValueError:
             continue
         m = e.get("message") or {}
-        if e.get("type") == "assistant" and "usage" in m:
-            last[m.get("id")] = (m.get("model", "?"), m["usage"])
-            final = m.get("stop_reason") is not None
-    return last, final
+        if e.get("type") != "assistant" or "usage" not in m:
+            continue
+        d = msgs.setdefault(m.get("id"), {"model": m.get("model", "?"), "usage": None, "final": False, "blocks": {}})
+        done = m.get("stop_reason") is not None
+        if done or not d["final"]:
+            u = dict(m["usage"])
+            if not done and d["usage"]:
+                u["output_tokens"] = max(u.get("output_tokens") or 0, d["usage"].get("output_tokens") or 0)
+            d["usage"], d["final"] = u, d["final"] or done
+        for b in m.get("content") or []:
+            text = b.get("text") or b.get("thinking") or ""
+            if b.get("type") == "tool_use":
+                text = json.dumps(b.get("input"), ensure_ascii=False)
+            if text:
+                d["blocks"][hashlib.sha1(text.encode()).hexdigest()] = len(text)
+        final = done
+    return msgs, final
 # SubagentStop can fire before the agent's last message is flushed; wait (bounded) until it is.
 deadline = time.time() + float(os.environ.get("COPE_USAGE_WAIT", "15"))
-last, final = read()
+msgs, final = read()
 while not final and time.time() < deadline:
     time.sleep(0.3)
-    last, final = read()
-by_model = {}
-for model, u in last.values():
-    t = by_model.setdefault(model, [0, 0, 0, 0])
-    for i, k in enumerate(("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")):
-        t[i] += u.get(k) or 0
+    msgs, final = read()
+# Totals per message as of now. Without a final usage, output is estimated from the visible content; hidden
+# thinking can't be counted, so an estimate is a lower bound.
+now = {}
+for mid, d in msgs.items():
+    t = [d["usage"].get(k) or 0 for k in KEYS]
+    est = 0
+    if not d["final"]:
+        guess = round(sum(d["blocks"].values()) / CHARS_PER_TOKEN)
+        if guess > t[3]:
+            t[3], est = guess, 1
+    now[str(mid)] = [d["model"]] + t + [est]
+# SubagentStop fires again when an agent resumes and stops again, and each transcript read is cumulative, so log
+# only what changed since this transcript was last logged. Summing the log's rows then gives each agent's total.
 log = sys.argv[1]
-new = not os.path.exists(log)
-with open(log, "a") as f:
-    if new:
-        f.write("time\tsession\trepo\tagent\tmodel\tinput\tcache_write\tcache_read\toutput\n")
-    for model, t in by_model.items():
-        f.write("\t".join([time.strftime("%Y-%m-%dT%H:%M:%S"), (ev.get("session_id") or "")[:8],
-                           sys.argv[2], agent, model.replace("claude-", "")]
-                          + [str(x) for x in t]) + "\n")
+state_dir = log + ".d"
+os.makedirs(state_dir, exist_ok=True)
+for name in os.listdir(state_dir):
+    p = os.path.join(state_dir, name)
+    if time.time() - os.path.getmtime(p) > 7 * 86400:
+        os.remove(p)
+with open(os.path.join(state_dir, hashlib.sha1(path.encode()).hexdigest()[:16]), "a+") as sf:
+    fcntl.flock(sf, fcntl.LOCK_EX)
+    sf.seek(0)
+    try:
+        before = json.loads(sf.read() or "{}")
+    except ValueError:
+        before = {}
+    by_model = {}
+    for mid, cur in now.items():
+        old = before.get(mid) or [cur[0]] + [0] * 5
+        t = by_model.setdefault(cur[0], [0] * 5)
+        for i in range(5):
+            t[i] += cur[i + 1] - old[i + 1]
+    new = not os.path.exists(log)
+    with open(log, "a") as f:
+        if new:
+            f.write("time\tsession\trepo\tagent\tmodel\tinput\tcache_write\tcache_read\toutput\toutput_est\tagents\n")
+        first = not before
+        for model, t in by_model.items():
+            if any(t):
+                # agents: 1 on the first row for this transcript, so the report counts spawns, not stops.
+                f.write("\t".join([time.strftime("%Y-%m-%dT%H:%M:%S"), (ev.get("session_id") or "")[:8],
+                                   sys.argv[2], agent, model.replace("claude-", "")]
+                                  + [str(x) for x in t] + [str(int(first))]) + "\n")
+                first = False
+    sf.seek(0)
+    sf.truncate()
+    sf.write(json.dumps(now))
 PY
 )
   # Parse in a detached process so the hook returns at once and never delays the agent.
@@ -231,11 +285,39 @@ PY
   exit 0
 }
 
+LOG_USAGE='usage: cope-wt log REPO PATH CANDIDATES STAGE VERDICT MODELS "TASK"
+  PATH: single|weak|code|question   CANDIDATES: executors spawned (a number)
+  STAGE: 1|2|3|none (the stage whose attempt was accepted)
+  VERDICT: applied|answered|blocked|conflict|clarify
+  MODELS: +-joined models of the executors and scouts that attempted it (haiku, sonnet, opus), plus opus-plan
+          if cope-planner ran; not the interpreter, profiler or verifier'
+
+# Fields are checked so every run's line reads the same way; nothing is written on a bad field.
 cmd_log() {
-  local f=${COPE_LOG:-$HOME/.claude/cope-log.tsv} IFS=$'\t'
-  (($#)) || die "usage: cope-wt log FIELD..."
+  local f=${COPE_LOG:-$HOME/.claude/cope-log.tsv} m models=() order
+  (($# == 7)) || die "expected 7 fields, got $#
+$LOG_USAGE"
+  [[ $2 =~ ^(single|weak|code|question)$ ]] || die "bad PATH '$2'
+$LOG_USAGE"
+  [[ $3 =~ ^[0-9]+$ ]] || die "bad CANDIDATES '$3'
+$LOG_USAGE"
+  [[ $4 =~ ^(1|2|3|none)$ ]] || die "bad STAGE '$4'
+$LOG_USAGE"
+  [[ $5 =~ ^(applied|answered|blocked|conflict|clarify)$ ]] || die "bad VERDICT '$5'
+$LOG_USAGE"
+  for m in $(tr ',+ ' '\n\n\n' <<<"${6,,}"); do
+    [[ $m =~ ^(haiku|sonnet|opus-plan|opus)$ ]] || die "bad model '$m' in MODELS '$6'
+$LOG_USAGE"
+  done
+  # Fixed order and no repeats: haiku+sonnet+opus-plan+opus.
+  for order in haiku sonnet opus-plan opus; do
+    tr ',+ ' '\n\n\n' <<<"${6,,}" | grep -qx "$order" && models+=("$order")
+  done
+  ((${#models[@]})) || die "MODELS is empty
+$LOG_USAGE"
+  [[ $1 != *$'\t'* && $7 != *$'\t'* ]] || die "REPO and TASK can't contain tabs"
   mkdir -p "$(dirname "$f")"
-  printf '%s\t%s\n' "$(date +%F)" "$*" >> "$f"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%F)" "$1" "$2" "$3" "$4" "$5" "$(IFS=+; echo "${models[*]}")" "$7" >> "$f"
   echo "LOGGED $f"
 }
 
@@ -244,7 +326,10 @@ cmd_report() {
   [[ -f $USAGE_LOG ]] || die "no usage log yet at $USAGE_LOG (is the SubagentStop hook installed?)"
   python3 -I - "$USAGE_LOG" "$n" <<'PY'
 import csv, sys, collections
-rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
+lines = list(csv.reader(open(sys.argv[1]), delimiter="\t"))
+# Logs started before output_est and agents existed keep the old header; their newer rows carry the extra columns.
+header = lines[0] + [c for c in ("output_est", "agents") if c not in lines[0]]
+rows = [dict(zip(header, l)) for l in lines[1:]]
 order = []
 for r in rows:
     if r["session"] not in order:
@@ -252,20 +337,25 @@ for r in rows:
 for s in order[-int(sys.argv[2]):]:
     rs = [r for r in rows if r["session"] == s]
     print(f"== session {s}  repo={rs[0]['repo']}  {rs[0]['time']} .. {rs[-1]['time'][11:]}")
-    agg = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
+    agg = collections.defaultdict(lambda: [0, 0, 0, 0, 0, 0])
     for r in rs:
         a = agg[(r["agent"], r["model"])]
-        a[0] += 1
-        for i, k in enumerate(("input", "cache_write", "cache_read", "output"), 1):
-            a[i] += int(r[k])
-    tot = collections.defaultdict(lambda: [0, 0, 0, 0])
+        # Rows from before the agents column was added each stand for one spawn.
+        a[0] += int(r.get("agents") or 1)
+        for i, k in enumerate(("input", "cache_write", "cache_read", "output", "output_est"), 1):
+            a[i] += int(r.get(k) or 0)
+    tot = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
+    # "~": some of the output was estimated from the transcript's text and is a lower bound.
+    out = lambda n, est: f"{n:>7}" + ("~" if est > 0 else "")
     for (agent, model), a in sorted(agg.items()):
-        print(f"  {agent:20} {model:12} x{a[0]:<2} in={a[1]:>7} cache_write={a[2]:>8} cache_read={a[3]:>9} out={a[4]:>7}")
+        print(f"  {agent:20} {model:12} x{a[0]:<2} in={a[1]:>7} cache_write={a[2]:>8} cache_read={a[3]:>9} out={out(a[4], a[5])}")
         t = tot[model]
-        for i in range(4):
+        for i in range(5):
             t[i] += a[i + 1]
     for model, t in sorted(tot.items()):
-        print(f"  {'TOTAL':20} {model:12}     in={t[0]:>7} cache_write={t[1]:>8} cache_read={t[2]:>9} out={t[3]:>7}")
+        print(f"  {'TOTAL':20} {model:12}     in={t[0]:>7} cache_write={t[1]:>8} cache_read={t[2]:>9} out={out(t[3], t[4])}")
+    if any(t[4] > 0 for t in tot.values()):
+        print("  ~ = includes output estimated from the transcript text (hidden thinking not counted)")
 PY
 }
 
